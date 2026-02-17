@@ -1,4 +1,4 @@
-# CertiMaster: The Ultimate Certificate Generator 🎓
+# CertiMaster: The Ultimate Certificate Generator
 
 ## Overview
 
@@ -54,11 +54,43 @@ Generate Certificates:
     Click the "Generate Certificates" button to start the creation process.
     View the preview and verify before finalizing.
 
+## Web Client (New)
 
-## 💪 Thanks to all Wonderful Contributors
+We now offer a fully client-side React version of CertiMaster! No installation required if deployed, or run it locally with Node.js.
+
+### Features
+
+- 100% Client-Side: No data leaves your browser.
+- Blazing Fast: Generates certificates instantly.
+- Multiple File Support: Upload .txt, .csv, .xlsx, or .xls files.
+- Custom Templates: proper .png, .jpg, or .jpeg support.
+- Drag-and-Drop Editor: Position names easily.
+- Customization: Adjust font, size, color, and position.
+- Batch Export: Download as ZIP.
+
+### Running the Web Client
+
+1. Navigate to the web directory:
+   ```bash
+   cd web
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Run the development server:
+   ```bash
+   npm run dev
+   ```
+
+4. Open the URL shown in the terminal.
+
+## Thanks to all Wonderful Contributors
 
 Thanks a lot for spending your time helping this InternetAwareAI grow.
-Thanks a lot! Keep rocking 🍻
+Thanks a lot! Keep rocking
 
 [![Contributors](https://contrib.rocks/image?repo=A-Akhil/CertiMaster)](https://github.com/A-Akhil/CertiMaster/graphs/contributors)
 
