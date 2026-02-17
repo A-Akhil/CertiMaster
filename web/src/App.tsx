@@ -473,10 +473,10 @@ export default function App() {
                </CardHeader>
                <CardContent className="flex-1 bg-slate-100/50 flex items-center justify-center p-4 overflow-hidden relative">
                    {template ? (
-                       <div className="overflow-auto max-w-full max-h-full flex items-center justify-center">
+                       <div className="w-full h-full flex items-center justify-center overflow-auto">
                             <canvas 
                                     ref={canvasRef}
-                                    style={{ maxWidth: '100%', maxHeight: '600px', objectFit: 'contain' }}
+                                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
                                     className="shadow-xl border border-slate-200 cursor-move bg-white"
                                     onMouseDown={handleMouseDown}
                                     onMouseMove={handleMouseMove}
