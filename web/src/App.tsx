@@ -21,6 +21,16 @@ export default function App() {
   const [template, setTemplate] = useState<string | null>(null)
   const [templateDimensions, setTemplateDimensions] = useState({ width: 0, height: 0 })
   const [names, setNames] = useState<string[]>([])
+  
+  // Advanced Data Handling State
+  const [fileType, setFileType] = useState<'txt' | 'csv' | 'excel' | null>(null)
+  const [workbook, setWorkbook] = useState<XLSX.WorkBook | null>(null)
+  const [sheetNames, setSheetNames] = useState<string[]>([])
+  const [selectedSheet, setSelectedSheet] = useState<string>("")
+  const [columns, setColumns] = useState<string[]>([])
+  const [selectedColumn, setSelectedColumn] = useState<string>("")
+  const [rawData, setRawData] = useState<any[]>([]) // Stores the parsed JSON data from current sheet/CSV
+
   const [previewName, setPreviewName] = useState("Your Name Here")
   const [zipName, setZipName] = useState("certificates")
   const [availableFonts, setAvailableFonts] = useState<string[]>([
@@ -74,13 +84,61 @@ export default function App() {
     reader.readAsDataURL(file)
   }
 
+  // Effect to update names when column selection changes
+  useEffect(() => {
+    if (fileType === 'txt' || !selectedColumn || rawData.length === 0) return
+
+    const newNames = rawData.map((row: any) => String(row[selectedColumn] || "").trim()).filter(n => n)
+    setNames(newNames)
+    if (newNames.length > 0) setPreviewName(newNames[0])
+  }, [selectedColumn, rawData, fileType])
+
+  // Effect to handle sheet change for Excel
+  useEffect(() => {
+    if (fileType !== 'excel' || !workbook || !selectedSheet) return
+    
+    const sheet = workbook.Sheets[selectedSheet]
+    if (!sheet) return
+
+    // Parse sheet to JSON with headers
+    const json = XLSX.utils.sheet_to_json(sheet)
+    if (json.length === 0) {
+        setRawData([])
+        setColumns([])
+        setNames([])
+        return
+    }
+
+    setRawData(json)
+    
+    // Extract headers from first row
+    const firstRow = json[0] as object;
+    const cols = Object.keys(firstRow);
+    setColumns(cols)
+    
+    if (cols.length > 0) {
+        setSelectedColumn(cols[0])
+    }
+  }, [selectedSheet, workbook, fileType])
+
+
   const handleDataUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
     const ext = file.name.split(".").pop()?.toLowerCase()
+    
+    // Reset states
+    setNames([])
+    setRawData([])
+    setColumns([])
+    setSheetNames([])
+    setWorkbook(null)
+    setSelectedSheet("")
+    setSelectedColumn("")
 
     if (ext === "txt") {
+      setFileType('txt')
       const reader = new FileReader()
       reader.onload = (event) => {
         const text = event.target?.result as string
@@ -90,30 +148,31 @@ export default function App() {
       }
       reader.readAsText(file)
     } else if (ext === "csv") {
+        setFileType('csv')
         Papa.parse(file, {
+            header: true,
+            skipEmptyLines: true,
             complete: (results) => {
-                const parsedNames = results.data.map((row: any) => {
-                    if (Array.isArray(row)) return row[0]
-                    if (typeof row === 'object') return Object.values(row)[0]
-                    return String(row)
-                }).filter((n: any) => n)
-                setNames(parsedNames as string[])
-                if (parsedNames.length > 0) setPreviewName(parsedNames[0] as string)
-            },
-            header: false
+                const data = results.data as any[]
+                setRawData(data)
+                if (data.length > 0) {
+                    const cols = Object.keys(data[0])
+                    setColumns(cols)
+                    if (cols.length > 0) setSelectedColumn(cols[0])
+                }
+            }
         })
     } else if (ext === "xlsx" || ext === "xls") {
+        setFileType('excel')
         const reader = new FileReader()
         reader.onload = (event) => {
             const data = new Uint8Array(event.target?.result as ArrayBuffer)
-            const workbook = XLSX.read(data, { type: "array" })
-            const sheetName = workbook.SheetNames[0]
-            const sheet = workbook.Sheets[sheetName]
-            const json = XLSX.utils.sheet_to_json(sheet, { header: 1 })
-            // @ts-ignore
-            const parsedNames = json.flat().map((n: any) => String(n).trim()).filter((n: any) => n)
-            setNames(parsedNames)
-            if (parsedNames.length > 0) setPreviewName(parsedNames[0])
+            const wb = XLSX.read(data, { type: "array" })
+            setWorkbook(wb)
+            setSheetNames(wb.SheetNames)
+            if (wb.SheetNames.length > 0) {
+                setSelectedSheet(wb.SheetNames[0])
+            }
         }
         reader.readAsArrayBuffer(file)
     }
@@ -277,6 +336,37 @@ export default function App() {
                     <div className="grid w-full max-w-sm items-center gap-1.5">
                          <Label htmlFor="names">Names List (TXT, CSV, XLSX)</Label>
                          <Input id="names" type="file" accept=".txt,.csv,.xlsx,.xls" onChange={handleDataUpload} />
+                         
+                         {fileType === 'excel' && sheetNames.length > 0 && (
+                             <div className="space-y-1">
+                                 <Label className="text-xs text-slate-500">Select Sheet</Label>
+                                 <select 
+                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                     value={selectedSheet}
+                                     onChange={(e) => setSelectedSheet(e.target.value)}
+                                 >
+                                     {sheetNames.map(sheet => (
+                                         <option key={sheet} value={sheet}>{sheet}</option>
+                                     ))}
+                                 </select>
+                             </div>
+                         )}
+
+                         {(fileType === 'excel' || fileType === 'csv') && columns.length > 0 && (
+                             <div className="space-y-1">
+                                 <Label className="text-xs text-slate-500">Select Name Column</Label>
+                                 <select 
+                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                     value={selectedColumn}
+                                     onChange={(e) => setSelectedColumn(e.target.value)}
+                                 >
+                                     {columns.map(col => (
+                                         <option key={col} value={col}>{col}</option>
+                                     ))}
+                                 </select>
+                             </div>
+                         )}
+                         
                          <p className="text-xs text-muted-foreground">
                             {names.length > 0 ? <span className="text-green-600 font-medium">{names.length} names loaded</span> : "No names loaded"}
                          </p>
@@ -404,6 +494,10 @@ export default function App() {
            </Card>
         </div>
       </div>
+      
+      <footer className="mt-12 py-6 text-center text-slate-400 text-sm border-t border-slate-200/60">
+        <p>Created by <a href="https://github.com/A-Akhil" target="_blank" rel="noreferrer" className="font-medium hover:text-slate-600 transition-colors">Akhil</a></p>
+      </footer>
     </div>
   )
 }
