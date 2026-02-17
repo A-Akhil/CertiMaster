@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react"
-import { Download, FileText, ImageIcon } from "lucide-react"
+import { Download, FileText, ImageIcon, Linkedin, Coffee, Github } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -495,8 +495,43 @@ export default function App() {
         </div>
       </div>
       
-      <footer className="mt-12 py-6 text-center text-slate-400 text-sm border-t border-slate-200/60">
-        <p>Created by <a href="https://github.com/A-Akhil" target="_blank" rel="noreferrer" className="font-medium hover:text-slate-600 transition-colors">Akhil</a></p>
+      <footer className="mt-12 py-8 bg-slate-900 border-t border-slate-800 text-slate-400 text-sm">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-slate-200">CertiMaster</span>
+            <span>&copy; {new Date().getFullYear()}</span>
+          </div>
+          
+          <div className="flex items-center gap-6">
+             <a 
+               href="https://github.com/A-Akhil" 
+               target="_blank" 
+               rel="noreferrer" 
+               className="flex items-center gap-2 hover:text-white transition-colors"
+             >
+               <Github className="w-4 h-4" />
+               <span>GitHub</span>
+             </a>
+             <a 
+               href="https://www.linkedin.com/in/a-akhil-16b396201/" 
+               target="_blank" 
+               rel="noreferrer" 
+               className="flex items-center gap-2 hover:text-blue-400 transition-colors"
+             >
+               <Linkedin className="w-4 h-4" />
+               <span>LinkedIn</span>
+             </a>
+             <a 
+               href="https://buymeacoffee.com/aakhil" 
+               target="_blank" 
+               rel="noreferrer" 
+               className="flex items-center gap-2 hover:text-yellow-400 transition-colors"
+             >
+               <Coffee className="w-4 h-4" />
+               <span>Buy me a coffee</span>
+             </a>
+          </div>
+        </div>
       </footer>
     </div>
   )
