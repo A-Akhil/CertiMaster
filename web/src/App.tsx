@@ -10,12 +10,22 @@ import Papa from "papaparse"
 import JSZip from "jszip"
 import { saveAs } from "file-saver"
 
+// Add declaration for the experimental Local Font Access API
+declare global {
+  interface Window {
+    queryLocalFonts?: () => Promise<{ family: string; fullName: string; postscriptName: string; style: string }[]>;
+  }
+}
+
 export default function App() {
   const [template, setTemplate] = useState<string | null>(null)
   const [templateDimensions, setTemplateDimensions] = useState({ width: 0, height: 0 })
   const [names, setNames] = useState<string[]>([])
   const [previewName, setPreviewName] = useState("Your Name Here")
   const [zipName, setZipName] = useState("certificates")
+  const [availableFonts, setAvailableFonts] = useState<string[]>([
+    "Times New Roman", "Arial", "Courier New", "Georgia", "Verdana", "Trebuchet MS"
+  ])
   const [config, setConfig] = useState({
     x: 100,
     y: 100,
@@ -28,6 +38,21 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const dragStart = useRef({ x: 0, y: 0 })
+
+  // --- Font Loading ---
+  const loadLocalFonts = async () => {
+    if (window.queryLocalFonts) {
+      try {
+        const localFonts = await window.queryLocalFonts();
+        const fontFamilies = Array.from(new Set(localFonts.map(f => f.family))).sort();
+        setAvailableFonts(fontFamilies);
+      } catch (err) {
+        console.error("Failed to load local fonts:", err);
+      }
+    } else {
+      alert("Your browser does not support the Local Font Access API. Using default fonts.");
+    }
+  }
 
   // --- Handlers ---
 
@@ -299,18 +324,26 @@ export default function App() {
                                  </div>
                              </div>
                              <div className="space-y-2">
-                                 <Label>Font Family</Label>
+                                 <div className="flex justify-between items-center mb-1">
+                                    <Label>Font Family</Label>
+                                    <Button 
+                                        variant="outline" 
+                                        size="sm" 
+                                        className="h-7 text-xs px-3 bg-white"
+                                        onClick={loadLocalFonts}
+                                        title="Load installed fonts from your computer"
+                                    >
+                                        Load System Fonts
+                                    </Button>
+                                 </div>
                                  <select 
                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                     value={config.fontFamily}
                                     onChange={(e) => setConfig({...config, fontFamily: e.target.value})}
                                  >
-                                     <option value="Times New Roman">Times New Roman</option>
-                                     <option value="Arial">Arial</option>
-                                     <option value="Courier New">Courier New</option>
-                                     <option value="Georgia">Georgia</option>
-                                     <option value="Verdana">Verdana</option>
-                                     <option value="Trebuchet MS">Trebuchet MS</option>
+                                     {availableFonts.map(font => (
+                                         <option key={font} value={font}>{font}</option>
+                                     ))}
                                  </select>
                              </div>
                          </div>
