@@ -337,14 +337,16 @@ export default function App() {
                 <CardContent className="space-y-6">
                     
                     {/* File Uploads */}
-                    <div className="grid w-full max-w-sm items-center gap-1.5">
-                        <Label htmlFor="template">Template Image</Label>
+                    <div className="flex items-center gap-3">
+                        <Label htmlFor="template" className="whitespace-nowrap">Template Image</Label>
                         <Input id="template" type="file" accept="image/*" onChange={handleTemplateUpload} />
                     </div>
 
-                    <div className="grid w-full max-w-sm items-center gap-1.5 pt-4 border-t">
-                         <Label htmlFor="names">Names List (TXT, CSV, XLSX)</Label>
-                         <Input id="names" type="file" accept=".txt,.csv,.xlsx,.xls" onChange={handleDataUpload} />
+                    <div className="pt-4 border-t space-y-3">
+                         <div className="flex items-center gap-3">
+                             <Label htmlFor="names" className="whitespace-nowrap">Names List</Label>
+                             <Input id="names" type="file" accept=".txt,.csv,.xlsx,.xls" onChange={handleDataUpload} />
+                         </div>
                          
                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                              {fileType === 'excel' && sheetNames.length > 0 && (
@@ -383,13 +385,15 @@ export default function App() {
                          </p>
                     </div>
 
-                    <div className="pt-4 border-t space-y-4">
-                        <Label>Preview Options</Label>
-                        <Input 
-                            value={previewName}
-                            onChange={(e) => setPreviewName(e.target.value)}
-                            placeholder="Enter name for preview"
-                        />
+                    <div className="pt-4 border-t">
+                        <div className="flex items-center gap-3">
+                            <Label className="whitespace-nowrap">Preview Options</Label>
+                            <Input 
+                                value={previewName}
+                                onChange={(e) => setPreviewName(e.target.value)}
+                                placeholder="Enter name for preview"
+                            />
+                        </div>
                     </div>
 
                     {/* Controls */}
