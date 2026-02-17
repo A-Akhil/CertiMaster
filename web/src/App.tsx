@@ -50,7 +50,7 @@ export default function App() {
   const dragStart = useRef({ x: 0, y: 0 })
 
   // --- Font Loading ---
-  const loadLocalFonts = async () => {
+  const loadLocalFonts = async (showAlert = false) => {
     if (window.queryLocalFonts) {
       try {
         const localFonts = await window.queryLocalFonts();
@@ -59,10 +59,15 @@ export default function App() {
       } catch (err) {
         console.error("Failed to load local fonts:", err);
       }
-    } else {
+    } else if (showAlert) {
       alert("Your browser does not support the Local Font Access API. Using default fonts.");
     }
   }
+
+  // Auto-load fonts on component mount
+  useEffect(() => {
+    loadLocalFonts();
+  }, [])
 
   // --- Handlers ---
 
@@ -420,7 +425,7 @@ export default function App() {
                                         variant="outline" 
                                         size="sm" 
                                         className="h-7 text-xs px-3 bg-white"
-                                        onClick={loadLocalFonts}
+                                        onClick={() => loadLocalFonts(true)}
                                         title="Load installed fonts from your computer"
                                     >
                                         Load System Fonts
