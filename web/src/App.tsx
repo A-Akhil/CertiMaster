@@ -41,7 +41,8 @@ export default function App() {
     y: 100,
     fontSize: 50,
     color: "#000000",
-    fontFamily: "Times New Roman"
+    fontFamily: "Times New Roman",
+    textTransform: "capitalize" as "none" | "uppercase" | "lowercase" | "capitalize"
   })
   const [isGenerating, setIsGenerating] = useState(false)
   
@@ -185,6 +186,17 @@ export default function App() {
 
   // --- Drawing Logic ---
 
+  const applyTextTransform = (text: string, transform: string) => {
+    switch (transform) {
+      case "uppercase": return text.toUpperCase();
+      case "lowercase": return text.toLowerCase();
+      case "capitalize": return text.split(' ').map(word => 
+        word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+      ).join(' ');
+      default: return text;
+    }
+  }
+
   const drawPreview = () => {
     const canvas = canvasRef.current
     if (!canvas || !template) return
@@ -205,8 +217,8 @@ export default function App() {
        ctx.textAlign = "center"
        ctx.textBaseline = "middle"
        
-       // Use toUpperCase() since the python code did it
-       ctx.fillText(previewName.toUpperCase(), config.x, config.y)
+       const transformedText = applyTextTransform(previewName, config.textTransform);
+       ctx.fillText(transformedText, config.x, config.y)
     }
   }
 
@@ -287,7 +299,8 @@ export default function App() {
           ctx.fillStyle = config.color
           ctx.textAlign = "center"
           ctx.textBaseline = "middle"
-          ctx.fillText(name.toUpperCase(), config.x, config.y)
+          const transformedName = applyTextTransform(name, config.textTransform);
+          ctx.fillText(transformedName, config.x, config.y)
 
           const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"))
           if (blob) {
@@ -304,10 +317,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-900">
-      <div className="w-full px-4 grid grid-cols-1 lg:grid-cols-4 gap-8">
+      <div className="w-full px-4 grid grid-cols-1 lg:grid-cols-3 gap-8">
         
         {/* Header */}
-        <div className="col-span-1 lg:col-span-4 mb-4">
+        <div className="col-span-1 lg:col-span-3 mb-4">
             <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-2">
                <FileText className="w-8 h-8"/> CertiMaster
             </h1>
@@ -329,6 +342,47 @@ export default function App() {
                         <Input id="template" type="file" accept="image/*" onChange={handleTemplateUpload} />
                     </div>
 
+                    <div className="grid w-full max-w-sm items-center gap-1.5 pt-4 border-t">
+                         <Label htmlFor="names">Names List (TXT, CSV, XLSX)</Label>
+                         <Input id="names" type="file" accept=".txt,.csv,.xlsx,.xls" onChange={handleDataUpload} />
+                         
+                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                             {fileType === 'excel' && sheetNames.length > 0 && (
+                                 <div className="space-y-1">
+                                     <Label className="text-xs text-slate-500">Select Sheet</Label>
+                                     <select 
+                                         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                         value={selectedSheet}
+                                         onChange={(e) => setSelectedSheet(e.target.value)}
+                                     >
+                                         {sheetNames.map(sheet => (
+                                             <option key={sheet} value={sheet}>{sheet}</option>
+                                         ))}
+                                     </select>
+                                 </div>
+                             )}
+
+                             {(fileType === 'excel' || fileType === 'csv') && columns.length > 0 && (
+                                 <div className="space-y-1">
+                                     <Label className="text-xs text-slate-500">Select Name Column</Label>
+                                     <select 
+                                         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                         value={selectedColumn}
+                                         onChange={(e) => setSelectedColumn(e.target.value)}
+                                     >
+                                         {columns.map(col => (
+                                             <option key={col} value={col}>{col}</option>
+                                         ))}
+                                     </select>
+                                 </div>
+                             )}
+                         </div>
+                         
+                         <p className="text-xs text-muted-foreground">
+                            {names.length > 0 ? <span className="text-green-600 font-medium">{names.length} names loaded</span> : "No names loaded"}
+                         </p>
+                    </div>
+
                     <div className="pt-4 border-t space-y-4">
                         <Label>Preview Options</Label>
                         <Input 
@@ -338,89 +392,68 @@ export default function App() {
                         />
                     </div>
 
-                    <div className="grid w-full max-w-sm items-center gap-1.5">
-                         <Label htmlFor="names">Names List (TXT, CSV, XLSX)</Label>
-                         <Input id="names" type="file" accept=".txt,.csv,.xlsx,.xls" onChange={handleDataUpload} />
-                         
-                         {fileType === 'excel' && sheetNames.length > 0 && (
-                             <div className="space-y-1">
-                                 <Label className="text-xs text-slate-500">Select Sheet</Label>
-                                 <select 
-                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                     value={selectedSheet}
-                                     onChange={(e) => setSelectedSheet(e.target.value)}
-                                 >
-                                     {sheetNames.map(sheet => (
-                                         <option key={sheet} value={sheet}>{sheet}</option>
-                                     ))}
-                                 </select>
-                             </div>
-                         )}
-
-                         {(fileType === 'excel' || fileType === 'csv') && columns.length > 0 && (
-                             <div className="space-y-1">
-                                 <Label className="text-xs text-slate-500">Select Name Column</Label>
-                                 <select 
-                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                     value={selectedColumn}
-                                     onChange={(e) => setSelectedColumn(e.target.value)}
-                                 >
-                                     {columns.map(col => (
-                                         <option key={col} value={col}>{col}</option>
-                                     ))}
-                                 </select>
-                             </div>
-                         )}
-                         
-                         <p className="text-xs text-muted-foreground">
-                            {names.length > 0 ? <span className="text-green-600 font-medium">{names.length} names loaded</span> : "No names loaded"}
-                         </p>
-                    </div>
-
                     {/* Controls */}
-                    <div className="pt-4 border-t space-y-4">
-                        <div className="space-y-4">
-                            <Label>Font Size: {config.fontSize}px</Label>
-                            <Slider 
-                                value={[config.fontSize]} 
-                                min={10} max={300} step={1} 
-                                onValueChange={(val) => setConfig({...config, fontSize: val[0]})}
-                            />
-                        </div>
+                    <div className="pt-4 border-t">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <Label>Font Size: {config.fontSize}px</Label>
+                                <Slider 
+                                    value={[config.fontSize]} 
+                                    min={10} max={300} step={1} 
+                                    onValueChange={(val) => setConfig({...config, fontSize: val[0]})}
+                                />
+                            </div>
 
-                        <div className="space-y-4">
-                            <Label>Horizontal Position (X): {Math.round(config.x)}</Label>
-                            <Slider 
-                                value={[config.x]} 
-                                min={0} max={templateDimensions.width || 2000} step={1} 
-                                onValueChange={(val) => setConfig({...config, x: val[0]})}
-                            />
-                        </div>
+                            <div className="space-y-2">
+                                <Label>Horizontal Position (X): {Math.round(config.x)}</Label>
+                                <Slider 
+                                    value={[config.x]} 
+                                    min={0} max={templateDimensions.width || 2000} step={1} 
+                                    onValueChange={(val) => setConfig({...config, x: val[0]})}
+                                />
+                            </div>
 
-                         <div className="space-y-4">
-                            <Label>Vertical Position (Y): {Math.round(config.y)}</Label>
-                            <Slider 
-                                value={[config.y]} 
-                                min={0} max={templateDimensions.height || 2000} step={1} 
-                                onValueChange={(val) => setConfig({...config, y: val[0]})}
-                            />
-                        </div>
+                            <div className="space-y-2">
+                                <Label>Vertical Position (Y): {Math.round(config.y)}</Label>
+                                <Slider 
+                                    value={[config.y]} 
+                                    min={0} max={templateDimensions.height || 2000} step={1} 
+                                    onValueChange={(val) => setConfig({...config, y: val[0]})}
+                                />
+                            </div>
 
-                         <div className="grid grid-cols-2 gap-4">
-                             <div className="space-y-2">
-                                 <Label>Font Color</Label>
-                                 <div className="flex items-center gap-2">
-                                     <input 
+                            <div className="md:col-span-2 grid grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <Label>Font Color</Label>
+                                    <input 
                                         type="color" 
                                         className="h-9 w-full rounded-md border border-input bg-background p-1 cursor-pointer"
                                         value={config.color}
                                         onChange={(e) => setConfig({...config, color: e.target.value})}
-                                     />
-                                 </div>
-                             </div>
+                                    />
+                                </div>
+
+                                <div className="space-y-2">
+                                    <Label>Text Case</Label>
+                                    <select 
+                                        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                        value={config.textTransform}
+                                        onChange={(e) => setConfig({...config, textTransform: e.target.value as any})}
+                                    >
+                                        <option value="none">Original</option>
+                                        <option value="uppercase">UPPERCASE</option>
+                                        <option value="lowercase">lowercase</option>
+                                        <option value="capitalize">Capitalize Each Word</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="md:col-span-2 space-y-2">
                              <div className="space-y-2">
+                                 <Label>Font Family</Label>
+                                 <div className="flex items-center gap-2">
+                                 <div className="flex-1">
                                  <div className="flex justify-between items-center mb-1">
-                                    <Label>Font Family</Label>
                                     <Button 
                                         variant="outline" 
                                         size="sm" 
@@ -440,15 +473,19 @@ export default function App() {
                                          <option key={font} value={font}>{font}</option>
                                      ))}
                                  </select>
+                                 </div>
+                                 </div>
                              </div>
-                         </div>
-                         <div className="space-y-4 pt-4 border-t">
-                             <Label>Output Filename (sufixed with .zip)</Label>
-                             <Input 
-                                value={zipName}
-                                onChange={(e) => setZipName(e.target.value)}
-                                placeholder="certificates"
-                             />
+                             </div>
+                             
+                             <div className="md:col-span-2 space-y-2 pt-4 border-t">
+                                 <Label>Output Filename (sufixed with .zip)</Label>
+                                 <Input 
+                                    value={zipName}
+                                    onChange={(e) => setZipName(e.target.value)}
+                                    placeholder="certificates"
+                                 />
+                             </div>
                         </div>
                     </div>
                 </CardContent>
@@ -467,7 +504,7 @@ export default function App() {
         </div>
 
         {/* Right Panel: Preview */}
-        <div className="col-span-1 lg:col-span-3">
+        <div className="col-span-1 lg:col-span-2">
            <Card className="h-full flex flex-col min-h-[600px]">
                <CardHeader>
                    <CardTitle>Preview</CardTitle>
