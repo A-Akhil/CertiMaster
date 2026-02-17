@@ -94,6 +94,12 @@ Thanks a lot! Keep rocking
 
 [![Contributors](https://contrib.rocks/image?repo=A-Akhil/CertiMaster)](https://github.com/A-Akhil/CertiMaster/graphs/contributors)
 
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+You are free to use, modify, and distribute this software, but attribution to the original author (A Akhil) is required.
+
 <div align="center">
 
 ## Please support the development by donating.
