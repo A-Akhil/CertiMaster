@@ -32,6 +32,7 @@ export default function App() {
   const [rawData, setRawData] = useState<any[]>([]) // Stores the parsed JSON data from current sheet/CSV
 
   const [previewName, setPreviewName] = useState("Your Name Here")
+  const [previewMode, setPreviewMode] = useState<'largest' | 'median' | 'smallest'>('largest')
   const [zipName, setZipName] = useState("certificates")
   const [availableFonts, setAvailableFonts] = useState<string[]>([
     "Times New Roman", "Arial", "Courier New", "Georgia", "Verdana", "Trebuchet MS"
@@ -96,8 +97,27 @@ export default function App() {
 
     const newNames = rawData.map((row: any) => String(row[selectedColumn] || "").trim()).filter(n => n)
     setNames(newNames)
-    if (newNames.length > 0) setPreviewName(newNames[0])
   }, [selectedColumn, rawData, fileType])
+
+  // Effect to update preview name based on mode when names change
+  useEffect(() => {
+    if (names.length === 0) return
+    
+    const sortedByLength = [...names].sort((a, b) => b.length - a.length)
+    
+    switch (previewMode) {
+      case 'largest':
+        setPreviewName(sortedByLength[0])
+        break
+      case 'smallest':
+        setPreviewName(sortedByLength[sortedByLength.length - 1])
+        break
+      case 'median':
+        const midIndex = Math.floor(sortedByLength.length / 2)
+        setPreviewName(sortedByLength[midIndex])
+        break
+    }
+  }, [names, previewMode])
 
   // Effect to handle sheet change for Excel
   useEffect(() => {
@@ -150,7 +170,6 @@ export default function App() {
         const text = event.target?.result as string
         const parsedNames = text.split("\n").map(n => n.trim()).filter(n => n)
         setNames(parsedNames)
-        if (parsedNames.length > 0) setPreviewName(parsedNames[0])
       }
       reader.readAsText(file)
     } else if (ext === "csv") {
@@ -385,13 +404,25 @@ export default function App() {
                          </p>
                     </div>
 
-                    <div className="pt-4 border-t">
+                    <div className="pt-4 border-t space-y-3">
                         <div className="flex items-center gap-3">
-                            <Label className="whitespace-nowrap">Preview Options</Label>
+                            <Label className="whitespace-nowrap">Preview Mode</Label>
+                            <select 
+                                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                value={previewMode}
+                                onChange={(e) => setPreviewMode(e.target.value as any)}
+                            >
+                                <option value="largest">Largest Name</option>
+                                <option value="median">Median Name</option>
+                                <option value="smallest">Smallest Name</option>
+                            </select>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <Label className="whitespace-nowrap">Custom Preview</Label>
                             <Input 
                                 value={previewName}
                                 onChange={(e) => setPreviewName(e.target.value)}
-                                placeholder="Enter name for preview"
+                                placeholder="Or enter custom name"
                             />
                         </div>
                     </div>
