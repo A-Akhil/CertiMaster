@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react"
-import { Download, FileText, ImageIcon, Linkedin, Coffee, Github } from "lucide-react"
+import { Download, FileText, ImageIcon, Linkedin, Coffee, Github, ChevronUp, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -431,12 +431,43 @@ export default function App() {
                     <div className="pt-4 border-t">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
-                                <Label>Font Size: {config.fontSize}px</Label>
-                                <Slider 
-                                    value={[config.fontSize]} 
-                                    min={10} max={300} step={1} 
-                                    onValueChange={(val) => setConfig({...config, fontSize: val[0]})}
-                                />
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm">Font size</span>
+
+                                    <Button
+                                        variant="outline"
+                                        size="icon"
+                                        className="h-8 w-8"
+                                        onClick={() =>
+                                        setConfig(prev => ({
+                                            ...prev,
+                                            fontSize: Math.max(10, prev.fontSize - 1)
+                                        }))
+                                        }
+                                        disabled={config.fontSize <= 10}
+                                        title="Decrease font size"
+                                    >
+                                        <ChevronDown className="w-5 h-5" />
+                                    </Button>
+
+                                    <span className="px-2 text-lg font-mono">{config.fontSize}</span>
+
+                                    <Button
+                                        variant="outline"
+                                        size="icon"
+                                        className="h-8 w-8"
+                                        onClick={() =>
+                                        setConfig(prev => ({
+                                            ...prev,
+                                            fontSize: Math.min(300, prev.fontSize + 1)
+                                        }))
+                                        }
+                                        disabled={config.fontSize >= 300}
+                                        title="Increase font size"
+                                    >
+                                        <ChevronUp className="w-5 h-5" />
+                                    </Button>
+                                </div>
                             </div>
 
                             <div className="space-y-2">
