@@ -126,6 +126,16 @@ cd verification-backend && npx wrangler deploy
 
 Edit `verification-backend/src/verify-valid.html` and `verify-invalid.html` directly. Use `{{NAME}}`, `{{EVENT}}`, `{{DATE}}`, `{{ID}}`, `{{ORG_NAME}}`, and `{{VERIFIED_ON}}` as placeholders — they are filled in at request time. Redeploy with `npx wrangler deploy` to apply changes.
 
+### Updating the worker
+
+Any change — whether to the HTML templates or to the worker logic in `src/index.js` — takes effect after redeploying:
+
+```bash
+cd verification-backend && npx wrangler deploy
+```
+
+Secrets and D1 data are preserved across deployments. Only the worker code changes.
+
 ### Admin panel
 
 A password-protected admin panel is available at `<worker-url>/admin`. Log in with your `ADMIN_KEY` to view, search, filter, add, edit, and delete certificate records.
