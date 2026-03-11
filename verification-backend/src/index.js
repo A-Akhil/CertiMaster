@@ -499,7 +499,6 @@ function renderAdminHTML() {
     <div class="filters">
       <input type="text"   id="f-name"      placeholder="Filter by name"       oninput="debounceFilter()">
       <input type="text"   id="f-event"     placeholder="Filter by event"      oninput="debounceFilter()">
-      <input type="date"   id="f-date"      placeholder="Exact date"           oninput="applyFilters()">
       <input type="date"   id="f-date-from" placeholder="Date from"            oninput="applyFilters()">
       <input type="date"   id="f-date-to"   placeholder="Date to"              oninput="applyFilters()">
       <button class="btn btn-ghost" style="height:34px" onclick="clearFilters()">Clear</button>
@@ -535,7 +534,12 @@ function renderAdminHTML() {
     <h2>Add Certificate Record</h2>
     <div id="add-error" class="error-msg" style="display:none"></div>
     <div class="field"><label>Name</label><input type="text" id="add-name" placeholder="Recipient name"></div>
-    <div class="field"><label>Event</label><input type="text" id="add-event" placeholder="Event name"></div>
+    <div class="field"><label>Event</label>
+      <select id="add-event-select" onchange="handleEventSelect()">
+        <option value="" disabled selected>Loading events...</option>
+      </select>
+      <input type="text" id="add-event" placeholder="Type event name" style="display:none;margin-top:.5rem">
+    </div>
     <div class="field"><label>Date</label><input type="date" id="add-date"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="document.getElementById('add-modal').style.display='none'">Cancel</button>
@@ -640,12 +644,10 @@ function renderAdminHTML() {
     const p = new URLSearchParams();
     const name      = document.getElementById('f-name').value.trim();
     const event     = document.getElementById('f-event').value.trim();
-    const date      = document.getElementById('f-date').value;
     const dateFrom  = document.getElementById('f-date-from').value;
     const dateTo    = document.getElementById('f-date-to').value;
     if (name)     p.set('name', name);
     if (event)    p.set('event', event);
-    if (date)     p.set('date', date);
     if (dateFrom) p.set('date_from', dateFrom);
     if (dateTo)   p.set('date_to', dateTo);
     p.set('page', page);
@@ -770,12 +772,49 @@ function renderAdminHTML() {
   }
 
   // ── Add ─────────────────────────────────────────────────────────────────────
-  function openAddModal() {
+  async function openAddModal() {
     document.getElementById('add-name').value  = '';
     document.getElementById('add-event').value = '';
+    document.getElementById('add-event').style.display = 'none';
     document.getElementById('add-date').value  = new Date().toISOString().split('T')[0];
     document.getElementById('add-error').style.display = 'none';
     document.getElementById('add-modal').style.display = 'flex';
+    await loadEventOptions();
+  }
+
+  async function loadEventOptions() {
+    const sel = document.getElementById('add-event-select');
+    sel.innerHTML = '<option value="" disabled selected>Loading...</option>';
+    try {
+      const res  = await api('GET', '/admin/api/records?per_page=200');
+      const data = await res.json();
+      const events = [...new Set((data.records || []).map(r => r.event))].sort();
+      sel.innerHTML = '';
+      events.forEach(ev => {
+        const opt = document.createElement('option');
+        opt.value = ev; opt.textContent = ev;
+        sel.appendChild(opt);
+      });
+      const other = document.createElement('option');
+      other.value = '__other__'; other.textContent = 'Other (type below)';
+      sel.appendChild(other);
+      if (events.length > 0) sel.value = events[0];
+    } catch {
+      sel.innerHTML = '<option value="__other__">Type event name below</option>';
+      document.getElementById('add-event').style.display = 'block';
+    }
+  }
+
+  function handleEventSelect() {
+    const sel   = document.getElementById('add-event-select');
+    const input = document.getElementById('add-event');
+    if (sel.value === '__other__') {
+      input.style.display = 'block';
+      input.focus();
+    } else {
+      input.style.display = 'none';
+      input.value = '';
+    }
   }
 
   function closeAddModal(e) {
@@ -784,7 +823,10 @@ function renderAdminHTML() {
 
   async function submitAdd() {
     const name  = document.getElementById('add-name').value.trim();
-    const event = document.getElementById('add-event').value.trim();
+    const sel   = document.getElementById('add-event-select');
+    const event = sel.value === '__other__'
+      ? document.getElementById('add-event').value.trim()
+      : sel.value.trim();
     const date  = document.getElementById('add-date').value;
     const err   = document.getElementById('add-error');
     err.style.display = 'none';
@@ -808,7 +850,7 @@ function renderAdminHTML() {
 
   function applyFilters() { page = 1; loadRecords(); }
   function clearFilters() {
-    ['f-name','f-event','f-date','f-date-from','f-date-to'].forEach(id => {
+    ['f-name','f-event','f-date-from','f-date-to'].forEach(id => {
       document.getElementById(id).value = '';
     });
     page = 1; loadRecords();
