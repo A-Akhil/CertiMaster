@@ -58,7 +58,7 @@ export default function App() {
   const [verificationApiKey, setVerificationApiKey] = useState("")
   const [eventName, setEventName] = useState("")
   const [eventDate, setEventDate] = useState(new Date().toISOString().split('T')[0])
-  const [qrConfig, setQrConfig] = useState({ x: 50, y: 50, size: 120 })
+  const [qrConfig, setQrConfig] = useState({ x: 20, y: 20, size: 188 })
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   type DragMode = 'none' | 'text' | 'qr' | 'qr-resize'
@@ -399,7 +399,7 @@ export default function App() {
         return
       }
       if (!verificationApiKey.trim()) {
-        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but API Key is empty.' })
+        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but Server Password is empty.' })
         return
       }
       if (!eventName.trim()) {
@@ -508,7 +508,7 @@ export default function App() {
           try {
             const err = await res.json()
             if (res.status === 401) {
-              errMsg = 'Wrong API key (401 Unauthorized). Certificates downloaded but not saved to verification database.'
+              errMsg = 'Wrong Server Password (401 Unauthorized). Certificates downloaded but not saved to verification database.'
             } else if (res.status === 400) {
               errMsg = `Bad request: ${err.error || 'unknown'} (400). Certificates downloaded but not saved.`
             } else {
@@ -763,7 +763,17 @@ export default function App() {
                                 <p className="text-xs text-muted-foreground">Print a scannable QR on each certificate</p>
                             </div>
                             <button
-                                onClick={() => setVerificationEnabled(v => !v)}
+                                onClick={() => {
+                                  if (!verificationEnabled) {
+                                    const canvas = canvasRef.current
+                                    const size = 188
+                                    const margin = 20
+                                    const x = margin
+                                    const y = canvas ? canvas.height - size - margin : margin
+                                    setQrConfig({ x, y, size })
+                                  }
+                                  setVerificationEnabled(v => !v)
+                                }}
                                 className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none ${
                                     verificationEnabled ? 'bg-blue-600' : 'bg-slate-300'
                                 }`}
@@ -791,7 +801,7 @@ export default function App() {
                                 </div>
 
                                 <div className="space-y-1">
-                                    <Label className="text-xs">API Key</Label>
+                                    <Label className="text-xs">Server Password</Label>
                                     <Input
                                         type="password"
                                         value={verificationApiKey}
