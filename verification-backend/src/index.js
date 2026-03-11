@@ -549,9 +549,9 @@ function renderAdminHTML() {
 
     <!-- Pagination -->
     <div class="pagination">
-      <button class="btn btn-ghost" id="btn-prev" onclick="goPrev()">Prev</button>
+      <button class="btn btn-ghost" id="btn-prev" onclick="goPrev()" style="padding:.55rem 1.4rem;font-size:.875rem">Prev</button>
       <span id="page-info">-</span>
-      <button class="btn btn-ghost" id="btn-next" onclick="goNext()">Next</button>
+      <button class="btn btn-ghost" id="btn-next" onclick="goNext()" style="padding:.55rem 1.4rem;font-size:.875rem">Next</button>
     </div>
   </div>
 </div>
