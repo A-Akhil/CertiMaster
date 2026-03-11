@@ -292,6 +292,25 @@ export default {
         ).bind(singleMatch[1]).run();
         return json({ success: true });
       }
+
+      // DELETE /admin/api/records  — bulk delete by ids[] or by event
+      if (method === "DELETE" && path === "/admin/api/records") {
+        const body = await request.json().catch(() => ({}));
+        if (body.event) {
+          const r = await env.DB.prepare(
+            "DELETE FROM certificates WHERE event = ?1"
+          ).bind(body.event).run();
+          return json({ success: true, deleted: r.meta?.changes ?? 0 });
+        }
+        if (Array.isArray(body.ids) && body.ids.length > 0) {
+          const placeholders = body.ids.map((_, i) => '?'+(i+1)).join(',');
+          const r = await env.DB.prepare(
+            `DELETE FROM certificates WHERE id IN (${placeholders})`
+          ).bind(...body.ids).run();
+          return json({ success: true, deleted: r.meta?.changes ?? 0 });
+        }
+        return json({ error: 'Provide ids[] or event' }, 400);
+      }
     }
 
     return json({ error: "Not found" }, 404);
@@ -505,16 +524,25 @@ function renderAdminHTML() {
       <button class="btn btn-sm"   style="height:34px;margin-left:auto" onclick="openAddModal()">+ Add Record</button>
     </div>
 
+    <!-- Bulk action bar -->
+    <div id="bulk-bar" style="display:none;align-items:center;gap:.75rem;padding:.5rem .75rem;background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;margin-bottom:.5rem;font-size:.85rem">
+      <span id="bulk-count" style="font-weight:600">0 selected</span>
+      <button class="btn btn-danger" style="height:30px;font-size:.8rem" onclick="bulkDeleteSelected()">Delete selected</button>
+      <button class="btn" style="height:30px;font-size:.8rem;background:#7c3aed;color:#fff" onclick="bulkDeleteByEvent()">Delete entire event</button>
+      <button class="btn btn-ghost" style="height:30px;font-size:.8rem;margin-left:auto" onclick="clearSelection()">Cancel</button>
+    </div>
+
     <!-- Table -->
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
+            <th style="width:2rem"><input type="checkbox" id="chk-all" onchange="toggleSelectAll(this.checked)" title="Select all"></th>
             <th>Name</th><th>Event</th><th>Date</th><th>Certificate ID</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="records-body">
-          <tr><td colspan="5" class="empty">Loading...</td></tr>
+          <tr><td colspan="6" class="empty">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -657,13 +685,13 @@ function renderAdminHTML() {
 
   async function loadRecords() {
     const tbody = document.getElementById('records-body');
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">Loading...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">Loading...</td></tr>';
     try {
       const res  = await api('GET', '/admin/api/records?' + buildQuery());
       const data = await res.json();
       renderTable(data);
     } catch(e) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty">Failed to load records.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">Failed to load records.</td></tr>';
     }
   }
 
@@ -675,7 +703,7 @@ function renderAdminHTML() {
     document.getElementById('btn-next').disabled = data.page >= data.total_pages;
 
     if (!data.records || data.records.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty">No records found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No records found.</td></tr>';
       return;
     }
 
@@ -686,11 +714,11 @@ function renderAdminHTML() {
       tr.innerHTML = rowHTML(r);
       tbody.appendChild(tr);
     });
+    clearSelection();
   }
 
   function rowHTML(r) {
-    return \`
-      <td>\${esc(r.name)}</td>
+    return \`      <td style="text-align:center"><input type="checkbox" class="row-chk" data-id="\${esc(r.id)}" data-event="\${esc(r.event)}" onchange="updateBulkBar()"></td>      <td>\${esc(r.name)}</td>
       <td>\${esc(r.event)}</td>
       <td>\${esc(r.date)}</td>
       <td class="id-cell" title="\${esc(r.id)}">\${esc(r.id)}</td>
@@ -701,8 +729,7 @@ function renderAdminHTML() {
   }
 
   function editRowHTML(r) {
-    return \`
-      <td><input class="inline" id="ei-name"  value="\${esc(r.name)}"></td>
+    return \`      <td></td>      <td><input class="inline" id="ei-name"  value="\${esc(r.name)}"></td>
       <td><input class="inline" id="ei-event" value="\${esc(r.event)}"></td>
       <td><input class="inline" type="date" id="ei-date" value="\${esc(r.date)}"></td>
       <td class="id-cell" title="\${esc(r.id)}">\${esc(r.id)}</td>
@@ -713,8 +740,7 @@ function renderAdminHTML() {
   }
 
   function deleteConfirmHTML(id) {
-    return \`
-      <td colspan="3" style="color:#b91c1c;font-weight:600">Delete this record?</td>
+    return \`      <td></td>      <td colspan="3" style="color:#b91c1c;font-weight:600">Delete this record?</td>
       <td class="id-cell" title="\${esc(id)}">\${esc(id)}</td>
       <td class="actions">
         <button class="btn btn-danger" onclick="doDelete('\${esc(id)}')">Confirm</button>
@@ -768,6 +794,70 @@ function renderAdminHTML() {
       if (tr) tr.remove();
       loadStats();
       toast('Record deleted.');
+    } catch(e) { toast('Network error.', true); }
+  }
+
+  // ── Bulk selection ──────────────────────────────────────────────────────────
+  function getCheckedIds() {
+    return [...document.querySelectorAll('.row-chk:checked')].map(c => c.dataset.id);
+  }
+
+  function toggleSelectAll(checked) {
+    document.querySelectorAll('.row-chk').forEach(c => c.checked = checked);
+    updateBulkBar();
+  }
+
+  function updateBulkBar() {
+    const ids = getCheckedIds();
+    const bar = document.getElementById('bulk-bar');
+    document.getElementById('bulk-count').textContent = ids.length + ' selected';
+    bar.style.display = ids.length > 0 ? 'flex' : 'none';
+    const all = document.querySelectorAll('.row-chk');
+    const chkAll = document.getElementById('chk-all');
+    if (chkAll) chkAll.indeterminate = ids.length > 0 && ids.length < all.length;
+    if (chkAll) chkAll.checked = ids.length > 0 && ids.length === all.length;
+  }
+
+  function clearSelection() {
+    document.querySelectorAll('.row-chk').forEach(c => c.checked = false);
+    const chkAll = document.getElementById('chk-all');
+    if (chkAll) { chkAll.checked = false; chkAll.indeterminate = false; }
+    document.getElementById('bulk-bar').style.display = 'none';
+  }
+
+  async function bulkDeleteSelected() {
+    const ids = getCheckedIds();
+    if (!ids.length) return;
+    if (!confirm('Delete ' + ids.length + ' selected record(s)?')) return;
+    try {
+      const res  = await api('DELETE', '/admin/api/records', { ids });
+      const data = await res.json();
+      if (!res.ok) { toast(data.error || 'Bulk delete failed.', true); return; }
+      toast('Deleted ' + (data.deleted ?? ids.length) + ' record(s).');
+      clearSelection();
+      loadRecords();
+      loadStats();
+    } catch(e) { toast('Network error.', true); }
+  }
+
+  async function bulkDeleteByEvent() {
+    const checked = [...document.querySelectorAll('.row-chk:checked')];
+    if (!checked.length) { toast('Select at least one record first.', true); return; }
+    const events = [...new Set(checked.map(c => c.dataset.event))];
+    if (events.length > 1) {
+      toast('Selected rows span multiple events. Filter by a single event first, then use Select All.', true);
+      return;
+    }
+    const ev = events[0];
+    if (!confirm('Delete ALL certificates for event "' + ev + '"? This cannot be undone.')) return;
+    try {
+      const res  = await api('DELETE', '/admin/api/records', { event: ev });
+      const data = await res.json();
+      if (!res.ok) { toast(data.error || 'Delete failed.', true); return; }
+      toast('Deleted ' + (data.deleted ?? '?') + ' record(s) for "' + ev + '".');
+      clearSelection();
+      loadRecords();
+      loadStats();
     } catch(e) { toast('Network error.', true); }
   }
 
