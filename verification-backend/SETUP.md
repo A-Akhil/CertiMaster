@@ -47,14 +47,9 @@ If you do not have Node.js, download it from https://nodejs.org or use a version
 
 Wrangler is the Cloudflare Workers command-line tool.
 
-Install globally:
+No install needed — use `npx` to run it directly from the project directory:
 ```bash
-npm install -g wrangler
-```
-
-Verify installation:
-```bash
-wrangler --version
+npx wrangler --version
 ```
 
 ### 3. Cloudflare account
@@ -66,7 +61,7 @@ Workers and D1 are both available on the free tier. No credit card is required.
 ### 4. Authenticate Wrangler with your account
 
 ```bash
-wrangler login
+npx wrangler login
 ```
 
 This opens a browser window. Log in with your Cloudflare credentials. Wrangler stores your credentials locally for future commands.
