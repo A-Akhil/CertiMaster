@@ -1,10 +1,27 @@
 # Verification Backend Setup Guide
 
-This guide walks through deploying your own instance of the CertiMaster verification backend. The backend is a Cloudflare Worker backed by a Cloudflare D1 (SQLite) database. It handles certificate verification, batch saving from the CertiMaster frontend, and an admin panel for managing records.
+The CertiMaster frontend only needs a base URL that exposes a specific set of HTTP endpoints. **The backend can be anything** — the Cloudflare Worker in this folder is the reference implementation, but you can run an Express server, a FastAPI app, a Railway deployment, or any other stack as long as it implements the required API contract described below.
 
 ---
 
-## What you will have at the end
+## Required API contract
+
+Any backend you use must expose these endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/health` | Returns `{"status":"ok","db":"connected","certificates":<n>,"org":"<name>"}`. The frontend pings this before generation to verify the server is reachable and the DB is connected. Must return HTTP 200 when healthy, 503 when degraded. |
+| `POST` | `/api/batch-save` | Accepts `Authorization: Bearer <API_KEY>` header and a JSON array of `{id, name, event, date}` objects. Saves records to a database. Returns `{"success":true,"saved":<n>}`. |
+| `GET` | `/verify/:id` | Public. Returns an HTML page confirming the certificate is valid or not found. |
+| `GET` | `/admin` | Optional. Admin panel UI. |
+
+CORS headers (`Access-Control-Allow-Origin: *`) are required on `/health`, `/api/batch-save`, and `/verify/:id` since the frontend calls them cross-origin from the browser.
+
+The Cloudflare Worker in `src/index.js` is a complete reference implementation of this contract. The rest of this guide covers deploying that specific implementation.
+
+---
+
+## What you will have at the end (Cloudflare deployment)
 
 - A public verification URL: `https://your-worker.workers.dev/verify/<uuid>` — scannable QR codes on certificates open this page
 - A batch-save API endpoint: `POST https://your-worker.workers.dev/api/batch-save` — called by CertiMaster frontend when generating certificates

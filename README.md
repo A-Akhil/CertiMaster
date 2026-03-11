@@ -100,9 +100,9 @@ The web client includes an optional QR code verification system. When enabled, e
 
 ### Setting up the backend
 
-The verification backend is a Cloudflare Worker located in `verification-backend/`. It requires a free Cloudflare account.
+The verification backend just needs to be any server that exposes the required endpoints (`GET /health`, `POST /api/batch-save`, `GET /verify/:id`). The Cloudflare Worker in `verification-backend/` is the reference implementation, but you can use Express, FastAPI, Railway, or any other stack.
 
-Full step-by-step setup instructions are in [verification-backend/SETUP.md](verification-backend/SETUP.md).
+Full step-by-step setup instructions (including the required API contract) are in [verification-backend/SETUP.md](verification-backend/SETUP.md).
 
 Quick summary:
 ```bash
