@@ -87,6 +87,51 @@ We now offer a fully client-side React version of CertiMaster! No installation r
 
 4. Open the URL shown in the terminal.
 
+## QR Verification System
+
+The web client includes an optional QR code verification system. When enabled, each certificate gets a unique QR code printed on it. Scanning the QR opens a hosted verification page that confirms the certificate is genuine.
+
+### How it works
+
+1. Each certificate is assigned a UUID at generation time.
+2. A QR code encoding `<server-url>/verify/<uuid>` is drawn onto the certificate canvas.
+3. All records are batch-saved to a Cloudflare D1 database via the verification backend.
+4. Anyone who scans the QR gets a verification page showing the recipient name, event, and issue date — or an "invalid" page if the ID does not exist.
+
+### Setting up the backend
+
+The verification backend is a Cloudflare Worker located in `verification-backend/`. It requires a free Cloudflare account.
+
+Full step-by-step setup instructions are in [verification-backend/SETUP.md](verification-backend/SETUP.md).
+
+Quick summary:
+```bash
+# 1. Create the D1 database
+npx wrangler d1 create certimaster-db
+
+# 2. Paste the returned database_id into verification-backend/wrangler.toml
+
+# 3. Run the schema migration
+npx wrangler d1 execute certimaster-db --remote --file=verification-backend/schema.sql
+
+# 4. Set your two keys
+echo "your-api-key"   | npx wrangler secret put API_KEY
+echo "your-admin-pwd" | npx wrangler secret put ADMIN_KEY
+
+# 5. Deploy
+cd verification-backend && npx wrangler deploy
+```
+
+### Customising the verify page
+
+Edit `verification-backend/src/verify-valid.html` and `verify-invalid.html` directly. Use `{{NAME}}`, `{{EVENT}}`, `{{DATE}}`, `{{ID}}`, `{{ORG_NAME}}`, and `{{VERIFIED_ON}}` as placeholders — they are filled in at request time. Redeploy with `npx wrangler deploy` to apply changes.
+
+### Admin panel
+
+A password-protected admin panel is available at `<worker-url>/admin`. Log in with your `ADMIN_KEY` to view, search, filter, add, edit, and delete certificate records.
+
+---
+
 ## Thanks to all Wonderful Contributors
 
 Thanks a lot for spending your time helping this InternetAwareAI grow.

@@ -9,6 +9,7 @@ import * as XLSX from "xlsx"
 import Papa from "papaparse"
 import JSZip from "jszip"
 import { saveAs } from "file-saver"
+import QRCode from "qrcode"
 
 // Add declaration for the experimental Local Font Access API
 declare global {
@@ -46,10 +47,24 @@ export default function App() {
     textTransform: "capitalize" as "none" | "uppercase" | "lowercase" | "capitalize"
   })
   const [isGenerating, setIsGenerating] = useState(false)
-  
+  const [verificationStatus, setVerificationStatus] = useState<{
+    type: 'success' | 'error' | 'warning'
+    message: string
+  } | null>(null)
+
+  // Verification State
+  const [verificationEnabled, setVerificationEnabled] = useState(false)
+  const [verificationServerUrl, setVerificationServerUrl] = useState("")
+  const [verificationApiKey, setVerificationApiKey] = useState("")
+  const [eventName, setEventName] = useState("")
+  const [eventDate, setEventDate] = useState(new Date().toISOString().split('T')[0])
+  const [qrConfig, setQrConfig] = useState({ x: 50, y: 50, size: 120 })
+
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [isDragging, setIsDragging] = useState(false)
+  type DragMode = 'none' | 'text' | 'qr' | 'qr-resize'
+  const [dragMode, setDragMode] = useState<DragMode>('none')
   const dragStart = useRef({ x: 0, y: 0 })
+  const resizeStart = useRef({ size: 120, originX: 0, originY: 0 })
 
   // --- Font Loading ---
   const loadLocalFonts = async (showAlert = false) => {
@@ -216,122 +231,307 @@ export default function App() {
     }
   }
 
-  const drawPreview = () => {
+  const drawPreview = async () => {
     const canvas = canvasRef.current
     if (!canvas || !template) return
-
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    const img = new Image()
-    img.src = template
-    img.onload = () => {
-       canvas.width = img.width
-       canvas.height = img.height
+    await new Promise<void>((resolve) => {
+      const img = new Image()
+      img.onload = async () => {
+        canvas.width = img.width
+        canvas.height = img.height
+        ctx.drawImage(img, 0, 0)
 
-       ctx.drawImage(img, 0, 0)
+        ctx.font = `${config.fontSize}px "${config.fontFamily}"`
+        ctx.fillStyle = config.color
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        const transformedText = applyTextTransform(previewName, config.textTransform)
+        ctx.fillText(transformedText, config.x, config.y)
 
-       ctx.font = `${config.fontSize}px "${config.fontFamily}"`
-       ctx.fillStyle = config.color
-       ctx.textAlign = "center"
-       ctx.textBaseline = "middle"
-       
-       const transformedText = applyTextTransform(previewName, config.textTransform);
-       ctx.fillText(transformedText, config.x, config.y)
-    }
+        if (verificationEnabled) {
+          try {
+            const qrCanvas = document.createElement('canvas')
+            await QRCode.toCanvas(qrCanvas, 'https://example.com/verify/preview', {
+              width: qrConfig.size,
+              margin: 1
+            })
+            ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
+
+            // Dashed blue selection border
+            ctx.strokeStyle = '#3b82f6'
+            ctx.lineWidth = Math.max(2, img.width / 400)
+            ctx.setLineDash([Math.max(4, img.width / 200), Math.max(2, img.width / 400)])
+            ctx.strokeRect(qrConfig.x - 2, qrConfig.y - 2, qrConfig.size + 4, qrConfig.size + 4)
+            ctx.setLineDash([])
+
+            // Bottom-right resize handle (blue square)
+            const grip = Math.max(12, qrConfig.size * 0.18)
+            ctx.fillStyle = '#3b82f6'
+            ctx.fillRect(
+              qrConfig.x + qrConfig.size - grip / 2,
+              qrConfig.y + qrConfig.size - grip / 2,
+              grip, grip
+            )
+          } catch (err) {
+            console.error('QR preview render failed:', err)
+          }
+        }
+        resolve()
+      }
+      img.src = template
+    })
   }
 
   useEffect(() => {
     drawPreview()
-  }, [template, config, previewName])
+  }, [template, config, previewName, verificationEnabled, qrConfig])
+
+  // --- Drag / Resize Helpers ---
+
+  const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return { x: 0, y: 0 }
+    const rect = canvas.getBoundingClientRect()
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height)
+    }
+  }
+
+  const getHitTarget = (mouseX: number, mouseY: number): DragMode => {
+    if (verificationEnabled) {
+      const inQrX = mouseX >= qrConfig.x && mouseX <= qrConfig.x + qrConfig.size
+      const inQrY = mouseY >= qrConfig.y && mouseY <= qrConfig.y + qrConfig.size
+      if (inQrX && inQrY) {
+        const resizeZone = qrConfig.size * 0.28
+        if (
+          mouseX >= qrConfig.x + qrConfig.size - resizeZone &&
+          mouseY >= qrConfig.y + qrConfig.size - resizeZone
+        ) return 'qr-resize'
+        return 'qr'
+      }
+    }
+    return 'text'
+  }
+
+  const getCursorForTarget = (target: DragMode) => {
+    if (target === 'qr-resize') return 'nwse-resize'
+    if (target === 'qr') return 'grab'
+    return 'move'
+  }
 
   // --- Dragging Logic ---
-  
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current
-      if(!canvas) return;
-      
-      const rect = canvas.getBoundingClientRect()
-      // Calculate scale if canvas is displayed smaller than actual size
-      const scaleX = canvas.width / rect.width
-      const scaleY = canvas.height / rect.height
+    const { x: mouseX, y: mouseY } = getCanvasCoords(e)
+    const target = getHitTarget(mouseX, mouseY)
+    setDragMode(target)
 
-      const mouseX = (e.clientX - rect.left) * scaleX
-      const mouseY = (e.clientY - rect.top) * scaleY
-
-      setIsDragging(true)
+    if (target === 'text') {
       dragStart.current = { x: mouseX - config.x, y: mouseY - config.y }
+    } else if (target === 'qr') {
+      dragStart.current = { x: mouseX - qrConfig.x, y: mouseY - qrConfig.y }
+    } else if (target === 'qr-resize') {
+      resizeStart.current = { size: qrConfig.size, originX: mouseX, originY: mouseY }
+    }
   }
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!isDragging) return
-      const canvas = canvasRef.current
-      if(!canvas) return;
-      
-      const rect = canvas.getBoundingClientRect()
-      const scaleX = canvas.width / rect.width
-      const scaleY = canvas.height / rect.height
+    const { x: mouseX, y: mouseY } = getCanvasCoords(e)
+    const canvas = canvasRef.current
 
-      const mouseX = (e.clientX - rect.left) * scaleX
-      const mouseY = (e.clientY - rect.top) * scaleY
+    // Update cursor on hover (even without dragging)
+    if (dragMode === 'none' && canvas) {
+      canvas.style.cursor = getCursorForTarget(getHitTarget(mouseX, mouseY))
+    }
 
+    if (dragMode === 'none') return
+
+    if (dragMode === 'text') {
       setConfig(prev => ({
-          ...prev,
-          x: mouseX - dragStart.current.x,
-          y: mouseY - dragStart.current.y
+        ...prev,
+        x: mouseX - dragStart.current.x,
+        y: mouseY - dragStart.current.y
       }))
+    } else if (dragMode === 'qr') {
+      if (canvas) canvas.style.cursor = 'grabbing'
+      setQrConfig(prev => {
+        const maxX = Math.max(0, templateDimensions.width - prev.size)
+        const maxY = Math.max(0, templateDimensions.height - prev.size)
+        return {
+          ...prev,
+          x: Math.max(0, Math.min(maxX, mouseX - dragStart.current.x)),
+          y: Math.max(0, Math.min(maxY, mouseY - dragStart.current.y))
+        }
+      })
+    } else if (dragMode === 'qr-resize') {
+      if (canvas) canvas.style.cursor = 'nwse-resize'
+      const delta = (mouseX - resizeStart.current.originX + mouseY - resizeStart.current.originY) / 2
+      setQrConfig(prev => {
+        const maxSize = Math.min(
+          templateDimensions.width ? templateDimensions.width - prev.x : 600,
+          templateDimensions.height ? templateDimensions.height - prev.y : 600
+        )
+        const newSize = Math.round(Math.max(40, Math.min(maxSize, resizeStart.current.size + delta)))
+        return { ...prev, size: newSize }
+      })
+    }
   }
 
   const handleMouseUp = () => {
-      setIsDragging(false)
+    setDragMode('none')
+    const canvas = canvasRef.current
+    if (canvas) canvas.style.cursor = 'move'
   }
 
   // --- Generation Logic ---
 
   const generateCertificates = async () => {
-      if (!template || names.length === 0) return
-      setIsGenerating(true)
+    if (!template || names.length === 0) return
 
-      const zip = new JSZip()
-      const canvas = document.createElement("canvas")
-      const ctx = canvas.getContext("2d")
-      if (!ctx) return
-
-      const img = new Image()
-      img.src = template
-      
-      await new Promise((resolve) => { 
-        img.onload = resolve; 
-        if(img.complete) resolve(true); 
-      })
-      
-      canvas.width = img.width
-      canvas.height = img.height
-
-      // Use a for...of loop with delay to not freeze UI entirely
-      for (let i = 0; i < names.length; i++) {
-          const name = names[i];
-          ctx.clearRect(0, 0, canvas.width, canvas.height)
-          ctx.drawImage(img, 0, 0)
-          
-          ctx.font = `${config.fontSize}px "${config.fontFamily}"`
-          ctx.fillStyle = config.color
-          ctx.textAlign = "center"
-          ctx.textBaseline = "middle"
-          const transformedName = applyTextTransform(name, config.textTransform);
-          ctx.fillText(transformedName, config.x, config.y)
-
-          const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"))
-          if (blob) {
-              zip.file(`${name}.png`, blob)
-          }
-           // Small yielding to UI thread every 10 items
-           if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
+    // Validate verification config before starting
+    if (verificationEnabled) {
+      if (!verificationServerUrl.trim()) {
+        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but Server URL is empty.' })
+        return
+      }
+      if (!verificationApiKey.trim()) {
+        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but API Key is empty.' })
+        return
+      }
+      if (!eventName.trim()) {
+        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but Event Name is empty.' })
+        return
       }
 
-      const content = await zip.generateAsync({ type: "blob" })
-      saveAs(content, `${zipName || 'certificates'}.zip`)
-      setIsGenerating(false)
+      // Health-check: ping the backend before touching the canvas at all
+      setVerificationStatus({ type: 'warning', message: 'Checking verification server...' })
+      try {
+        const healthRes = await fetch(`${verificationServerUrl.replace(/\/$/, '')}/health`)
+        if (!healthRes.ok) {
+          const body = await healthRes.json().catch(() => ({}))
+          setVerificationStatus({
+            type: 'error',
+            message: `Verification server returned ${healthRes.status}. DB status: ${(body as { db?: string }).db ?? 'unknown'}. Generation aborted.`
+          })
+          return
+        }
+        const health = await healthRes.json() as { status: string; db: string; org: string; certificates: number }
+        if (health.status !== 'ok') {
+          setVerificationStatus({
+            type: 'error',
+            message: `Verification server is degraded (DB: ${health.db}). Generation aborted.`
+          })
+          return
+        }
+        setVerificationStatus({
+          type: 'success',
+          message: `Connected to "${health.org}" (${health.certificates} records in DB). Generating...`
+        })
+      } catch {
+        setVerificationStatus({
+          type: 'error',
+          message: 'Could not reach the verification server. Check the URL and try again. Generation aborted.'
+        })
+        return
+      }
+    }
+
+    setVerificationStatus(null)
+    setIsGenerating(true)
+
+    const zip = new JSZip()
+    const canvas = document.createElement("canvas")
+    const ctx = canvas.getContext("2d")
+    if (!ctx) { setIsGenerating(false); return }
+
+    const img = new Image()
+    img.src = template
+
+    await new Promise((resolve) => {
+      img.onload = resolve
+      if (img.complete) resolve(true)
+    })
+
+    canvas.width = img.width
+    canvas.height = img.height
+
+    // Collect verification records to batch-save at end
+    const batchRecords: { id: string; name: string; event: string; date: string }[] = []
+
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i]
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0)
+
+      ctx.font = `${config.fontSize}px "${config.fontFamily}"`
+      ctx.fillStyle = config.color
+      ctx.textAlign = "center"
+      ctx.textBaseline = "middle"
+      const transformedName = applyTextTransform(name, config.textTransform)
+      ctx.fillText(transformedName, config.x, config.y)
+
+      // Draw QR code if verification is enabled
+      if (verificationEnabled && verificationServerUrl.trim()) {
+        const id = crypto.randomUUID()
+        batchRecords.push({ id, name, event: eventName, date: eventDate })
+
+        const qrUrl = `${verificationServerUrl.replace(/\/$/, '')}/verify/${id}`
+        const qrCanvas = document.createElement('canvas')
+        await QRCode.toCanvas(qrCanvas, qrUrl, { width: qrConfig.size, margin: 1 })
+        ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
+      }
+
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"))
+      if (blob) zip.file(`${name}.png`, blob)
+
+      // Yield to UI thread every 10 items to avoid freezing
+      if (i % 10 === 0) await new Promise(r => setTimeout(r, 0))
+    }
+
+    // Batch-save all verification records to the backend
+    if (verificationEnabled && batchRecords.length > 0) {
+      try {
+        const res = await fetch(`${verificationServerUrl.replace(/\/$/, '')}/api/batch-save`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${verificationApiKey}`
+          },
+          body: JSON.stringify(batchRecords)
+        })
+        if (!res.ok) {
+          let errMsg = `HTTP ${res.status}`
+          try {
+            const err = await res.json()
+            if (res.status === 401) {
+              errMsg = 'Wrong API key (401 Unauthorized). Certificates downloaded but not saved to verification database.'
+            } else if (res.status === 400) {
+              errMsg = `Bad request: ${err.error || 'unknown'} (400). Certificates downloaded but not saved.`
+            } else {
+              errMsg = `Server error: ${err.error || errMsg}. Certificates downloaded but not saved.`
+            }
+          } catch { /* non-JSON body */ }
+          setVerificationStatus({ type: 'error', message: errMsg })
+        } else {
+          setVerificationStatus({ type: 'success', message: `Certificates generated and ${batchRecords.length} records saved to verification database.` })
+        }
+      } catch (err) {
+        setVerificationStatus({
+          type: 'error',
+          message: 'Could not reach the verification server. Check the URL. Certificates were downloaded but records were NOT saved.'
+        })
+      }
+    } else if (!verificationEnabled) {
+      setVerificationStatus(null)
+    }
+
+    const content = await zip.generateAsync({ type: "blob" })
+    saveAs(content, `${zipName || 'certificates'}.zip`)
+    setIsGenerating(false)
   }
 
   return (
@@ -554,8 +754,132 @@ export default function App() {
                              </div>
                         </div>
                     </div>
+
+                    {/* QR Verification */}
+                    <div className="pt-4 border-t space-y-3">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <Label className="font-semibold text-sm">QR Verification</Label>
+                                <p className="text-xs text-muted-foreground">Print a scannable QR on each certificate</p>
+                            </div>
+                            <button
+                                onClick={() => setVerificationEnabled(v => !v)}
+                                className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none ${
+                                    verificationEnabled ? 'bg-blue-600' : 'bg-slate-300'
+                                }`}
+                                aria-label="Toggle QR verification"
+                            >
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                                    verificationEnabled ? 'translate-x-6' : 'translate-x-1'
+                                }`}/>
+                            </button>
+                        </div>
+
+                        {verificationEnabled && (
+                            <div className="space-y-3 pl-1">
+                                <p className="text-xs text-muted-foreground bg-blue-50 border border-blue-100 rounded-md p-2">
+                                    Drag the QR directly on the preview to position it. Drag its bottom-right corner to resize. Use the slider for fine-tuning.
+                                </p>
+
+                                <div className="space-y-1">
+                                    <Label className="text-xs">Verification Server URL</Label>
+                                    <Input
+                                        value={verificationServerUrl}
+                                        onChange={(e) => setVerificationServerUrl(e.target.value)}
+                                        placeholder="https://your-worker.workers.dev"
+                                    />
+                                </div>
+
+                                <div className="space-y-1">
+                                    <Label className="text-xs">API Key</Label>
+                                    <Input
+                                        type="password"
+                                        value={verificationApiKey}
+                                        onChange={(e) => setVerificationApiKey(e.target.value)}
+                                        placeholder="Your secret key"
+                                    />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="space-y-1">
+                                        <Label className="text-xs">Event Name</Label>
+                                        <Input
+                                            value={eventName}
+                                            onChange={(e) => setEventName(e.target.value)}
+                                            placeholder="Annual Hackathon 2026"
+                                        />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <Label className="text-xs">Event Date</Label>
+                                        <Input
+                                            type="date"
+                                            value={eventDate}
+                                            onChange={(e) => setEventDate(e.target.value)}
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="space-y-1">
+                                    <Label className="text-xs">
+                                        X Position: <span className="font-mono text-slate-700">{Math.round(qrConfig.x)}</span>
+                                    </Label>
+                                    <Slider
+                                        value={[qrConfig.x]}
+                                        min={0}
+                                        max={Math.max(0, (templateDimensions.width || 2000) - qrConfig.size)}
+                                        step={1}
+                                        onValueChange={([val]) => setQrConfig(prev => ({ ...prev, x: val }))}
+                                    />
+                                </div>
+
+                                <div className="space-y-1">
+                                    <Label className="text-xs">
+                                        Y Position: <span className="font-mono text-slate-700">{Math.round(qrConfig.y)}</span>
+                                    </Label>
+                                    <Slider
+                                        value={[qrConfig.y]}
+                                        min={0}
+                                        max={Math.max(0, (templateDimensions.height || 2000) - qrConfig.size)}
+                                        step={1}
+                                        onValueChange={([val]) => setQrConfig(prev => ({ ...prev, y: val }))}
+                                    />
+                                </div>
+
+                                <div className="space-y-1">
+                                    <Label className="text-xs">
+                                        QR Size: <span className="font-mono text-slate-700">{qrConfig.size}px</span>
+                                        <span className="text-muted-foreground ml-1">(or drag corner in preview)</span>
+                                    </Label>
+                                    <Slider
+                                        value={[qrConfig.size]}
+                                        min={40}
+                                        max={Math.min(
+                                            500,
+                                            templateDimensions.width ? templateDimensions.width - qrConfig.x : 500,
+                                            templateDimensions.height ? templateDimensions.height - qrConfig.y : 500
+                                        )}
+                                        step={2}
+                                        onValueChange={([val]) => setQrConfig(prev => ({ ...prev, size: val }))}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </CardContent>
-                <CardFooter>
+                <CardFooter className="flex-col gap-3 items-stretch">
+                    {verificationStatus && (
+                        <div className={`text-sm rounded-md px-3 py-2 flex items-start gap-2 ${
+                            verificationStatus.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' :
+                            verificationStatus.type === 'warning' ? 'bg-yellow-50 text-yellow-800 border border-yellow-200' :
+                            'bg-red-50 text-red-800 border border-red-200'
+                        }`}>
+                            <span className="mt-0.5 shrink-0">
+                                {verificationStatus.type === 'success' ? '\u2713' :
+                                 verificationStatus.type === 'warning' ? '\u26a0' : '\u2717'}
+                            </span>
+                            <span>{verificationStatus.message}</span>
+                        </div>
+                    )}
                     <Button 
                         className="w-full" 
                         size="lg" 
@@ -575,8 +899,8 @@ export default function App() {
                <CardHeader>
                    <CardTitle>Preview</CardTitle>
                    <CardDescription>
-                        Drag the text to position it directly on the canvas. 
-                        Showing preview for: <span className="font-semibold text-primary">{previewName}</span>
+                        Drag the text to position it. {verificationEnabled && 'Drag the QR to move it, drag its bottom-right corner to resize. '}
+                        Showing: <span className="font-semibold text-primary">{previewName}</span>
                    </CardDescription>
                </CardHeader>
                <CardContent className="flex-1 bg-slate-100/50 flex items-center justify-center p-4 overflow-hidden relative">

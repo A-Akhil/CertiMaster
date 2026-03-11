@@ -1,0 +1,22 @@
+name = "certimaster-verification"
+main = "src/index.js"
+compatibility_date = "2024-03-11"
+workers_dev = true
+base_dir = "."
+
+# Bundle .html files as importable text strings
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
+
+# Plain (non-secret) environment variables
+# Change the value here to your organisation / event brand name.
+# It appears in the verify page footer as "Issued by <ORG_NAME>".
+[vars]
+VERIFY_ORG_NAME = "CertiMaster"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "certimaster-db"
+database_id = "PASTE_YOUR_DATABASE_ID_HERE"
