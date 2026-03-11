@@ -151,9 +151,9 @@ Thanks a lot! Keep rocking
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
-You are free to use, modify, and distribute this software, but attribution to the original author (A Akhil) is required.
+You are free to use, modify, and distribute this software under the terms of the GPL v3. Any derivative work must also be distributed under the same license.
 
 <div align="center">
 
