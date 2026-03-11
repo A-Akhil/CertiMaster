@@ -518,8 +518,8 @@ function renderAdminHTML() {
     <div class="filters">
       <input type="text"   id="f-name"      placeholder="Filter by name"       oninput="debounceFilter()">
       <input type="text"   id="f-event"     placeholder="Filter by event"      oninput="debounceFilter()">
-      <input type="date"   id="f-date-from" placeholder="Date from"            oninput="applyFilters()">
-      <input type="date"   id="f-date-to"   placeholder="Date to"              oninput="applyFilters()">
+      <label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:#64748b;white-space:nowrap">From <input type="date" id="f-date-from" oninput="applyFilters()" style="font-size:.8rem"></label>
+      <label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:#64748b;white-space:nowrap">To <input type="date" id="f-date-to" oninput="applyFilters()" style="font-size:.8rem"></label>
       <button class="btn btn-ghost" style="height:34px" onclick="clearFilters()">Clear</button>
       <button class="btn btn-sm"   style="height:34px;margin-left:auto" onclick="openAddModal()">+ Add Record</button>
     </div>
