@@ -289,6 +289,15 @@ export default function App() {
     drawPreview()
   }, [template, config, previewName, verificationEnabled, qrConfig])
 
+  // When template dimensions change (new image uploaded) and QR is on, snap to bottom-left
+  useEffect(() => {
+    if (verificationEnabled && templateDimensions.height > 0) {
+      const size = 188
+      const margin = 20
+      setQrConfig({ x: margin, y: templateDimensions.height - size - margin, size })
+    }
+  }, [templateDimensions])
+
   // --- Drag / Resize Helpers ---
 
   const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -765,12 +774,14 @@ export default function App() {
                             <button
                                 onClick={() => {
                                   if (!verificationEnabled) {
-                                    const canvas = canvasRef.current
                                     const size = 188
                                     const margin = 20
-                                    const x = margin
-                                    const y = canvas ? canvas.height - size - margin : margin
-                                    setQrConfig({ x, y, size })
+                                    const h = templateDimensions.height
+                                    setQrConfig({
+                                      x: margin,
+                                      y: h > 0 ? h - size - margin : margin,
+                                      size
+                                    })
                                   }
                                   setVerificationEnabled(v => !v)
                                 }}
