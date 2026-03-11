@@ -19,4 +19,6 @@ VERIFY_ORG_NAME = "CertiMaster"
 [[d1_databases]]
 binding = "DB"
 database_name = "certimaster-db"
+# Run: npx wrangler d1 create certimaster-db
+# then paste the returned database_id below
 database_id = "PASTE_YOUR_DATABASE_ID_HERE"
