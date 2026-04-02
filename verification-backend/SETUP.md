@@ -215,7 +215,7 @@ Note down your worker URL. You will need it in the next step.
 Open the CertiMaster web application. In the certificate generation settings, fill in:
 
 - **Verification Server URL**: `https://my-certimaster-verification.<subdomain>.workers.dev`
-- **API Key**: the value you set for `API_KEY` in Step 5
+- **Server Password**: the value you set for `API_KEY` in Step 5
 
 When you generate certificates with QR verification enabled, each certificate gets a unique UUID, a QR code printed on it, and the record is saved to your D1 database. Scanning the QR opens the verification page.
 
@@ -315,13 +315,29 @@ Secrets and D1 data are preserved across deployments. Only the worker code chang
 
 ## Rotating your keys
 
-To change a secret at any time:
+You can change passwords any time.
+
+Run:
 ```bash
 echo "NewKeyValue" | npx wrangler secret put API_KEY
 echo "NewPassword" | npx wrangler secret put ADMIN_KEY
 ```
 
-Changes take effect on the next request after Cloudflare propagates the update (usually a few seconds). Old sessions using the previous ADMIN_KEY will be invalidated immediately since tokens are verified against the current key on every request.
+What each one means:
+- `API_KEY` = the **Server Password** in CertiMaster (used when creating certificates)
+- `ADMIN_KEY` = the **Admin login password** (used in `/admin` page)
+
+If you change `API_KEY`:
+- Open CertiMaster frontend
+- Enter the new value in **Server Password**
+- Then generate certificates
+
+If you change `ADMIN_KEY`:
+- Use the new value next time you log in at `/admin`
+
+The change usually works in a few seconds.
+
+Note: old admin sessions may log out after `ADMIN_KEY` is changed.
 
 ---
 
