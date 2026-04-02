@@ -17,7 +17,7 @@
  */
 
 import React, { useState, useRef, useEffect } from "react"
-import { Download, FileText, ImageIcon, Linkedin, Coffee, Github, ChevronUp, ChevronDown } from "lucide-react"
+import { Download, FileText, ImageIcon, Linkedin, Coffee, Github, ChevronUp, ChevronDown, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -74,6 +74,9 @@ export default function App() {
   const [verificationEnabled, setVerificationEnabled] = useState(false)
   const [verificationServerUrl, setVerificationServerUrl] = useState("")
   const [verificationApiKey, setVerificationApiKey] = useState("")
+  const [autoNormalizeServerUrl, setAutoNormalizeServerUrl] = useState(true)
+  const [showServerPassword, setShowServerPassword] = useState(false)
+  const [isTestingConnection, setIsTestingConnection] = useState(false)
   const [eventName, setEventName] = useState("")
   const [eventDate, setEventDate] = useState(new Date().toISOString().split('T')[0])
   const [qrConfig, setQrConfig] = useState({ x: 20, y: 20, size: 188 })
@@ -416,15 +419,73 @@ export default function App() {
 
   // --- Generation Logic ---
 
+  const normalizeVerificationBaseUrl = (rawUrl: string): string | null => {
+    const input = rawUrl.trim()
+    if (!input) return null
+
+    const withProtocol = /^https?:\/\//i.test(input)
+      ? input
+      : (/^(localhost|127\.0\.0\.1)/i.test(input) ? `http://${input}` : `https://${input}`)
+
+    let parsed: URL
+    try {
+      parsed = new URL(withProtocol)
+    } catch {
+      return null
+    }
+
+    let pathname = (parsed.pathname || '/').replace(/\/+$/, '')
+
+    const stripSuffix = (suffix: string) => {
+      if (pathname.toLowerCase().endsWith(suffix)) {
+        pathname = pathname.slice(0, pathname.length - suffix.length)
+      }
+    }
+
+    stripSuffix('/health')
+    stripSuffix('/api/test-connection')
+    stripSuffix('/api/batch-save')
+
+    const verifyMatch = pathname.match(/\/verify\/[^/]+$/i)
+    if (verifyMatch?.index !== undefined) pathname = pathname.slice(0, verifyMatch.index)
+
+    if (/^\/admin(\/.*)?$/i.test(pathname)) pathname = ''
+
+    pathname = pathname.replace(/\/+$/, '')
+    return pathname ? `${parsed.origin}${pathname}` : parsed.origin
+  }
+
+  const fetchWithTimeout = async (url: string, init: RequestInit = {}, timeoutMs = 10000) => {
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      return await fetch(url, { ...init, signal: controller.signal })
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  }
+
+  const applyNormalizedServerUrl = () => {
+    if (!autoNormalizeServerUrl) return
+    const normalized = normalizeVerificationBaseUrl(verificationServerUrl)
+    if (normalized) setVerificationServerUrl(normalized)
+  }
+
   const generateCertificates = async () => {
     if (!template || names.length === 0) return
 
+    let baseUrl: string | null = null
+
     // Validate verification config before starting
     if (verificationEnabled) {
-      if (!verificationServerUrl.trim()) {
-        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but Server URL is empty.' })
+      baseUrl = autoNormalizeServerUrl
+        ? normalizeVerificationBaseUrl(verificationServerUrl)
+        : verificationServerUrl.trim()
+      if (!baseUrl) {
+        setVerificationStatus({ type: 'warning', message: 'Verification is enabled but Server URL is invalid or empty.' })
         return
       }
+      if (autoNormalizeServerUrl) setVerificationServerUrl(baseUrl)
       if (!verificationApiKey.trim()) {
         setVerificationStatus({ type: 'warning', message: 'Verification is enabled but Server Password is empty.' })
         return
@@ -437,7 +498,7 @@ export default function App() {
       // Health-check: ping the backend before touching the canvas at all
       setVerificationStatus({ type: 'warning', message: 'Checking verification server...' })
       try {
-        const healthRes = await fetch(`${verificationServerUrl.replace(/\/$/, '')}/health`)
+        const healthRes = await fetchWithTimeout(`${baseUrl}/health`)
         if (!healthRes.ok) {
           const body = await healthRes.json().catch(() => ({}))
           setVerificationStatus({
@@ -458,7 +519,14 @@ export default function App() {
           type: 'success',
           message: `Connected to "${health.org}" (${health.certificates} records in DB). Generating...`
         })
-      } catch {
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          setVerificationStatus({
+            type: 'error',
+            message: 'Verification server timed out after 10 seconds. Generation aborted.'
+          })
+          return
+        }
         setVerificationStatus({
           type: 'error',
           message: 'Could not reach the verification server. Check the URL and try again. Generation aborted.'
@@ -502,11 +570,11 @@ export default function App() {
       ctx.fillText(transformedName, config.x, config.y)
 
       // Draw QR code if verification is enabled
-      if (verificationEnabled && verificationServerUrl.trim()) {
+      if (verificationEnabled && baseUrl) {
         const id = crypto.randomUUID()
         batchRecords.push({ id, name, event: eventName, date: eventDate })
 
-        const qrUrl = `${verificationServerUrl.replace(/\/$/, '')}/verify/${id}`
+        const qrUrl = `${baseUrl}/verify/${id}`
         const qrCanvas = document.createElement('canvas')
         await QRCode.toCanvas(qrCanvas, qrUrl, { width: qrConfig.size, margin: 1 })
         ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
@@ -521,15 +589,21 @@ export default function App() {
 
     // Batch-save all verification records to the backend
     if (verificationEnabled && batchRecords.length > 0) {
+      if (!baseUrl) {
+        setVerificationStatus({
+          type: 'error',
+          message: 'Invalid Server URL. Certificates were downloaded but records were NOT saved.'
+        })
+      } else {
       try {
-        const res = await fetch(`${verificationServerUrl.replace(/\/$/, '')}/api/batch-save`, {
+        const res = await fetchWithTimeout(`${baseUrl}/api/batch-save`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${verificationApiKey}`
           },
           body: JSON.stringify(batchRecords)
-        })
+        }, 15000)
         if (!res.ok) {
           let errMsg = `HTTP ${res.status}`
           try {
@@ -547,10 +621,18 @@ export default function App() {
           setVerificationStatus({ type: 'success', message: `Certificates generated and ${batchRecords.length} records saved to verification database.` })
         }
       } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          setVerificationStatus({
+            type: 'error',
+            message: 'Save request timed out. Certificates were downloaded but records were NOT saved.'
+          })
+        } else {
         setVerificationStatus({
           type: 'error',
           message: 'Could not reach the verification server. Check the URL. Certificates were downloaded but records were NOT saved.'
         })
+        }
+      }
       }
     } else if (!verificationEnabled) {
       setVerificationStatus(null)
@@ -559,6 +641,81 @@ export default function App() {
     const content = await zip.generateAsync({ type: "blob" })
     saveAs(content, `${zipName || 'certificates'}.zip`)
     setIsGenerating(false)
+  }
+
+  const testVerificationConnection = async () => {
+    const baseUrl = autoNormalizeServerUrl
+      ? normalizeVerificationBaseUrl(verificationServerUrl)
+      : verificationServerUrl.trim()
+    if (!baseUrl) {
+      setVerificationStatus({ type: 'warning', message: 'Server URL is invalid or empty.' })
+      return
+    }
+    if (autoNormalizeServerUrl) setVerificationServerUrl(baseUrl)
+    if (!verificationApiKey.trim()) {
+      setVerificationStatus({ type: 'warning', message: 'Server Password is empty.' })
+      return
+    }
+
+    setIsTestingConnection(true)
+    setVerificationStatus({ type: 'warning', message: 'Testing connection...' })
+
+    try {
+      const healthRes = await fetchWithTimeout(`${baseUrl}/health`)
+      if (!healthRes.ok) {
+        const body = await healthRes.json().catch(() => ({})) as { db?: string }
+        setVerificationStatus({
+          type: 'error',
+          message: `Server reachable but unhealthy (${healthRes.status}). DB status: ${body.db ?? 'unknown'}.`
+        })
+        return
+      }
+
+      const health = await healthRes.json() as { status: string; db: string; org: string; certificates: number }
+      if (health.status !== 'ok') {
+        setVerificationStatus({
+          type: 'error',
+          message: `Server reachable but degraded (DB: ${health.db}).`
+        })
+        return
+      }
+
+      const testRes = await fetchWithTimeout(`${baseUrl}/api/test-connection`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${verificationApiKey}`
+        }
+      })
+
+      if (!testRes.ok) {
+        if (testRes.status === 401) {
+          setVerificationStatus({ type: 'error', message: 'Wrong Server Password (401 Unauthorized).' })
+        } else {
+          const body = await testRes.json().catch(() => ({})) as { error?: string }
+          setVerificationStatus({ type: 'error', message: body.error || `Connection test failed (${testRes.status}).` })
+        }
+        return
+      }
+
+      setVerificationStatus({
+        type: 'success',
+        message: `Connection successful. Server: "${health.org}". DB connected with ${health.certificates} records.`
+      })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setVerificationStatus({
+          type: 'error',
+          message: 'Testing connection timed out after 10 seconds.'
+        })
+        return
+      }
+      setVerificationStatus({
+        type: 'error',
+        message: 'Could not reach the verification server. Check the URL and try again.'
+      })
+    } finally {
+      setIsTestingConnection(false)
+    }
   }
 
   return (
@@ -825,18 +982,51 @@ export default function App() {
                                     <Input
                                         value={verificationServerUrl}
                                         onChange={(e) => setVerificationServerUrl(e.target.value)}
+                                    onBlur={applyNormalizedServerUrl}
                                         placeholder="https://your-worker.workers.dev"
                                     />
+                                  <label className="flex items-center gap-2 text-xs text-muted-foreground pt-1 cursor-pointer select-none">
+                                    <input
+                                      type="checkbox"
+                                      checked={autoNormalizeServerUrl}
+                                      onChange={(e) => setAutoNormalizeServerUrl(e.target.checked)}
+                                    />
+                                    Auto-normalize URL input
+                                  </label>
                                 </div>
 
                                 <div className="space-y-1">
                                     <Label className="text-xs">Server Password</Label>
+                                  <div className="relative">
                                     <Input
-                                        type="password"
-                                        value={verificationApiKey}
-                                        onChange={(e) => setVerificationApiKey(e.target.value)}
-                                        placeholder="Your secret key"
+                                      type={showServerPassword ? "text" : "password"}
+                                      value={verificationApiKey}
+                                      onChange={(e) => setVerificationApiKey(e.target.value)}
+                                      placeholder="Your secret key"
+                                      className="pr-10"
                                     />
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowServerPassword(v => !v)}
+                                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700"
+                                      aria-label={showServerPassword ? "Hide server password" : "Show server password"}
+                                    >
+                                      {showServerPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="pt-1">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={testVerificationConnection}
+                                    disabled={isTestingConnection}
+                                    className="h-8"
+                                  >
+                                    {isTestingConnection ? 'Testing...' : 'Test Connection'}
+                                  </Button>
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-3">

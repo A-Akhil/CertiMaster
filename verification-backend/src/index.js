@@ -78,6 +78,26 @@ export default {
     }
 
     // ── Generation: POST /api/batch-save ─────────────────────────────────────
+    if (method === "POST" && path === "/api/test-connection") {
+      const authHeader = request.headers.get("Authorization");
+      if (!authHeader || authHeader !== `Bearer ${env.API_KEY}`) {
+        return json({ error: "Unauthorized" }, 401, corsPublic);
+      }
+
+      try {
+        await env.DB.prepare("SELECT 1 as ok").first();
+      } catch {
+        return json({ error: "Database unavailable" }, 503, corsPublic);
+      }
+
+      return json({
+        success: true,
+        status: "ok",
+        org: (env.VERIFY_ORG_NAME) || "CertiMaster",
+        ts: new Date().toISOString(),
+      }, 200, corsPublic);
+    }
+
     if (method === "POST" && path === "/api/batch-save") {
       const authHeader = request.headers.get("Authorization");
       if (!authHeader || authHeader !== `Bearer ${env.API_KEY}`) {
