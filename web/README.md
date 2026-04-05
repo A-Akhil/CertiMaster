@@ -32,3 +32,8 @@ A modern, client-side React application for generating bulk certificates securel
 - `src/App.tsx`: Main application logic.
 - `src/components/ui`: Reusable UI components.
 - `src/lib/utils.ts`: Utility functions.
+
+## QR verification setup help
+
+If you want to use QR verification (server URL + password) and need backend setup steps, use:
+https://github.com/A-Akhil/CertiMaster/blob/main/verification-backend/SETUP.md

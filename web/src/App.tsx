@@ -976,6 +976,17 @@ export default function App() {
                                 <p className="text-xs text-muted-foreground bg-blue-50 border border-blue-100 rounded-md p-2">
                                     Drag the QR directly on the preview to position it. Drag its bottom-right corner to resize. Use the slider for fine-tuning.
                                 </p>
+                            <p className="text-xs text-slate-700">
+                              Need backend setup help for QR verification?{' '}
+                              <a
+                                href="https://github.com/A-Akhil/CertiMaster/blob/main/verification-backend/SETUP.md"
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-800 font-medium hover:underline"
+                              >
+                                Open setup guide
+                              </a>
+                            </p>
 
                                 <div className="space-y-1">
                                     <Label className="text-xs">Verification Server URL</Label>

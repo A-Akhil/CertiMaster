@@ -104,6 +104,9 @@ The verification backend just needs to be any server that exposes the required e
 
 Full step-by-step setup instructions (including the required API contract) are in [verification-backend/SETUP.md](verification-backend/SETUP.md).
 
+If you are reading this from outside the repo or do not have the backend folder locally, use this direct setup guide link:
+https://github.com/A-Akhil/CertiMaster/blob/main/verification-backend/SETUP.md
+
 Quick summary:
 ```bash
 # 1. Create the D1 database
