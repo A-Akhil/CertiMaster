@@ -82,6 +82,7 @@ export default function App() {
   const [qrConfig, setQrConfig] = useState({ x: 20, y: 20, size: 188 })
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const fontUploadRef = useRef<HTMLInputElement>(null)
   type DragMode = 'none' | 'text' | 'qr' | 'qr-resize'
   const [dragMode, setDragMode] = useState<DragMode>('none')
   const dragStart = useRef({ x: 0, y: 0 })
@@ -99,6 +100,30 @@ export default function App() {
       }
     } else if (showAlert) {
       alert("Your browser does not support the Local Font Access API. Using default fonts.");
+    }
+  }
+
+  const handleCustomFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const baseName = file.name.replace(/\.[^.]+$/, '').trim() || 'Custom Font'
+    const fontUrl = URL.createObjectURL(file)
+
+    try {
+      const fontFace = new FontFace(baseName, `url(${fontUrl})`)
+      const loadedFont = await fontFace.load()
+      document.fonts.add(loadedFont)
+      await document.fonts.load(`16px "${baseName}"`)
+
+      setAvailableFonts(prev => prev.includes(baseName) ? prev : [baseName, ...prev])
+      setConfig(prev => ({ ...prev, fontFamily: baseName }))
+    } catch (err) {
+      console.error('Failed to load custom font:', err)
+      alert('Failed to load the selected font. Try a valid .ttf, .otf, .woff, or .woff2 file.')
+    } finally {
+      URL.revokeObjectURL(fontUrl)
+      e.target.value = ''
     }
   }
 
@@ -264,6 +289,8 @@ export default function App() {
         canvas.width = img.width
         canvas.height = img.height
         ctx.drawImage(img, 0, 0)
+
+        try { await document.fonts.load(`${config.fontSize}px "${config.fontFamily}"`) } catch { /* no-op */ }
 
         ctx.font = `${config.fontSize}px "${config.fontFamily}"`
         ctx.fillStyle = config.color
@@ -553,6 +580,8 @@ export default function App() {
 
     canvas.width = img.width
     canvas.height = img.height
+
+    try { await document.fonts.load(`${config.fontSize}px "${config.fontFamily}"`) } catch { /* no-op */ }
 
     // Collect verification records to batch-save at end
     const batchRecords: { id: string; name: string; event: string; date: string }[] = []
@@ -913,7 +942,25 @@ export default function App() {
                                     >
                                         Load System Fonts
                                     </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 text-xs px-3 bg-white"
+                                    onClick={() => fontUploadRef.current?.click()}
+                                    title="Upload a custom font file"
+                                  >
+                                    Upload Font
+                                  </Button>
                                  </div>
+                                 <input
+                                  ref={fontUploadRef}
+                                  type="file"
+                                  accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
+                                  onChange={handleCustomFontUpload}
+                                  className="hidden"
+                                 />
+                                 <p className="text-[11px] text-slate-600 mb-1">Supported: .ttf, .otf, .woff, .woff2</p>
                                  <select 
                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                     value={config.fontFamily}
