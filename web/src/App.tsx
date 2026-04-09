@@ -36,6 +36,26 @@ declare global {
   }
 }
 
+type PersistedFontRecord = {
+  key: string
+  family: string
+  source: 'upload' | 'google'
+  blob: Blob
+  updatedAt: number
+}
+
+type GoogleFontItem = {
+  family: string
+  url: string
+}
+
+const FONT_DB_NAME = 'certimaster-fonts-db'
+const FONT_STORE_NAME = 'fonts'
+const MAX_GOOGLE_FONTS_IN_MEMORY = 20
+const PRELOAD_NEARBY_FORWARD = 10
+const PRELOAD_NEARBY_BACKWARD = 3
+const PRELOAD_CONCURRENCY = 2
+
 export default function App() {
   const [template, setTemplate] = useState<string | null>(null)
   const [templateDimensions, setTemplateDimensions] = useState({ width: 0, height: 0 })
@@ -56,6 +76,8 @@ export default function App() {
   const [availableFonts, setAvailableFonts] = useState<string[]>([
     "Times New Roman", "Arial", "Courier New", "Georgia", "Verdana", "Trebuchet MS"
   ])
+  const [googleFontsCatalog, setGoogleFontsCatalog] = useState<GoogleFontItem[]>([])
+  const [isLoadingGoogleFontsCatalog, setIsLoadingGoogleFontsCatalog] = useState(false)
   const [config, setConfig] = useState({
     x: 100,
     y: 100,
@@ -83,6 +105,10 @@ export default function App() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fontUploadRef = useRef<HTMLInputElement>(null)
+  const loadedFontFacesRef = useRef<Map<string, FontFace>>(new Map())
+  const googleFontLruRef = useRef<string[]>([])
+  const googleFontLoadInFlightRef = useRef<Map<string, Promise<void>>>(new Map())
+  const preloadTicketRef = useRef(0)
   type DragMode = 'none' | 'text' | 'qr' | 'qr-resize'
   const [dragMode, setDragMode] = useState<DragMode>('none')
   const dragStart = useRef({ x: 0, y: 0 })
@@ -94,7 +120,7 @@ export default function App() {
       try {
         const localFonts = await window.queryLocalFonts();
         const fontFamilies = Array.from(new Set(localFonts.map(f => f.family))).sort();
-        setAvailableFonts(fontFamilies);
+        setAvailableFonts(prev => Array.from(new Set([...prev, ...fontFamilies])).sort());
       } catch (err) {
         console.error("Failed to load local fonts:", err);
       }
@@ -103,33 +129,256 @@ export default function App() {
     }
   }
 
+  const openFontsDb = (): Promise<IDBDatabase> => {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(FONT_DB_NAME, 1)
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains(FONT_STORE_NAME)) {
+          db.createObjectStore(FONT_STORE_NAME, { keyPath: 'key' })
+        }
+      }
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    })
+  }
+
+  const getPersistedFonts = async (): Promise<PersistedFontRecord[]> => {
+    const db = await openFontsDb()
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(FONT_STORE_NAME, 'readonly')
+      const store = tx.objectStore(FONT_STORE_NAME)
+      const req = store.getAll()
+      req.onsuccess = () => resolve((req.result || []) as PersistedFontRecord[])
+      req.onerror = () => reject(req.error)
+    })
+  }
+
+  const getPersistedFontByKey = async (key: string): Promise<PersistedFontRecord | null> => {
+    const db = await openFontsDb()
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(FONT_STORE_NAME, 'readonly')
+      const store = tx.objectStore(FONT_STORE_NAME)
+      const req = store.get(key)
+      req.onsuccess = () => resolve((req.result as PersistedFontRecord) || null)
+      req.onerror = () => reject(req.error)
+    })
+  }
+
+  const savePersistedFont = async (record: PersistedFontRecord) => {
+    const db = await openFontsDb()
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(FONT_STORE_NAME, 'readwrite')
+      const store = tx.objectStore(FONT_STORE_NAME)
+      const req = store.put(record)
+      req.onsuccess = () => resolve()
+      req.onerror = () => reject(req.error)
+    })
+  }
+
+  const addFontToList = (family: string) => {
+    setAvailableFonts(prev => prev.includes(family) ? prev : [family, ...prev])
+  }
+
+  const registerFontFace = async (key: string, family: string, blob: Blob, source: 'upload' | 'google') => {
+    if (loadedFontFacesRef.current.has(key)) return
+
+    const fontUrl = URL.createObjectURL(blob)
+    try {
+      const fontFace = new FontFace(family, `url(${fontUrl})`)
+      const loaded = await fontFace.load()
+      document.fonts.add(loaded)
+      loadedFontFacesRef.current.set(key, loaded)
+
+      if (source === 'google') {
+        const lru = googleFontLruRef.current.filter(k => k !== key)
+        lru.push(key)
+        googleFontLruRef.current = lru
+
+        while (googleFontLruRef.current.length > MAX_GOOGLE_FONTS_IN_MEMORY) {
+          const evictKey = googleFontLruRef.current.shift()
+          if (!evictKey) break
+          if (evictKey === `google:${config.fontFamily}`) {
+            googleFontLruRef.current.push(evictKey)
+            continue
+          }
+          const face = loadedFontFacesRef.current.get(evictKey)
+          if (face) {
+            document.fonts.delete(face)
+            loadedFontFacesRef.current.delete(evictKey)
+          }
+        }
+      }
+    } finally {
+      URL.revokeObjectURL(fontUrl)
+    }
+  }
+
+  const loadGoogleFontsCatalog = async () => {
+    if (googleFontsCatalog.length > 0) return
+    setIsLoadingGoogleFontsCatalog(true)
+    try {
+      const res = await fetch('https://cdn.jsdelivr.net/npm/google-fonts-complete@2.2.3/google-fonts.json')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+      const data = await res.json() as Record<string, any>
+      const catalog: GoogleFontItem[] = Object.entries(data).map(([family, meta]) => {
+        const url =
+          meta?.variants?.normal?.['400']?.url?.woff2 ||
+          meta?.variants?.normal?.['400']?.url?.woff ||
+          meta?.variants?.normal?.['400']?.url?.ttf ||
+          ''
+        return { family, url }
+      }).filter(item => !!item.url)
+      .sort((a, b) => a.family.localeCompare(b.family))
+
+      setGoogleFontsCatalog(catalog)
+      setAvailableFonts(prev => Array.from(new Set([...prev, ...catalog.map(c => c.family)])).sort())
+    } catch (err) {
+      console.error('Failed to load Google font catalog:', err)
+      alert('Could not load Google Fonts list right now. Please try again.')
+    } finally {
+      setIsLoadingGoogleFontsCatalog(false)
+    }
+  }
+
+  const isWeakConnection = () => {
+    const nav = navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string }
+    }
+    const conn = nav.connection
+    if (!conn) return false
+    if (conn.saveData) return true
+    return conn.effectiveType === 'slow-2g' || conn.effectiveType === '2g'
+  }
+
+  const loadGoogleFontByItem = async (
+    item: GoogleFontItem,
+    options: { silent?: boolean } = {}
+  ) => {
+    const key = `google:${item.family}`
+
+    if (googleFontLoadInFlightRef.current.has(key)) {
+      await googleFontLoadInFlightRef.current.get(key)
+      return
+    }
+
+    const p = (async () => {
+      let record = await getPersistedFontByKey(key)
+      if (!record) {
+        const resp = await fetch(item.url)
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const blob = await resp.blob()
+        record = { key, family: item.family, source: 'google', blob, updatedAt: Date.now() }
+        await savePersistedFont(record)
+      } else {
+        await savePersistedFont({ ...record, updatedAt: Date.now() })
+      }
+
+      await registerFontFace(key, item.family, record.blob, 'google')
+      addFontToList(item.family)
+
+      // Force canvas redraw if this font is currently selected.
+      setConfig(prev => prev.fontFamily === item.family ? { ...prev } : prev)
+    })()
+
+    googleFontLoadInFlightRef.current.set(key, p)
+    try {
+      await p
+    } catch (err) {
+      if (!options.silent) {
+        console.error('Failed to load Google font:', err)
+        alert('Failed to load selected Google font.')
+      }
+    } finally {
+      googleFontLoadInFlightRef.current.delete(key)
+    }
+  }
+
+  const preloadNearbyGoogleFonts = async (selectedFamily: string) => {
+    if (isGenerating || isWeakConnection() || googleFontsCatalog.length === 0) return
+
+    const selectedIndex = googleFontsCatalog.findIndex(f => f.family === selectedFamily)
+    if (selectedIndex < 0) return
+
+    const start = Math.max(0, selectedIndex - PRELOAD_NEARBY_BACKWARD)
+    const end = Math.min(googleFontsCatalog.length - 1, selectedIndex + PRELOAD_NEARBY_FORWARD)
+    const candidates = googleFontsCatalog.slice(start, end + 1)
+      .filter(f => f.family !== selectedFamily)
+
+    const ticket = ++preloadTicketRef.current
+    let cursor = 0
+
+    const worker = async () => {
+      while (cursor < candidates.length) {
+        if (ticket !== preloadTicketRef.current) return
+        const i = cursor++
+        const item = candidates[i]
+        const key = `google:${item.family}`
+
+        if (loadedFontFacesRef.current.has(key)) continue
+
+        try {
+          await loadGoogleFontByItem(item, { silent: true })
+        } catch {
+          // Silent by design for preload path.
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: PRELOAD_CONCURRENCY }, () => worker()))
+  }
+
   const handleCustomFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
     const baseName = file.name.replace(/\.[^.]+$/, '').trim() || 'Custom Font'
-    const fontUrl = URL.createObjectURL(file)
+    const key = `upload:${baseName}`
 
     try {
-      const fontFace = new FontFace(baseName, `url(${fontUrl})`)
-      const loadedFont = await fontFace.load()
-      document.fonts.add(loadedFont)
-      await document.fonts.load(`16px "${baseName}"`)
+      await registerFontFace(key, baseName, file, 'upload')
+      await savePersistedFont({ key, family: baseName, source: 'upload', blob: file, updatedAt: Date.now() })
 
-      setAvailableFonts(prev => prev.includes(baseName) ? prev : [baseName, ...prev])
+      addFontToList(baseName)
       setConfig(prev => ({ ...prev, fontFamily: baseName }))
     } catch (err) {
       console.error('Failed to load custom font:', err)
       alert('Failed to load the selected font. Try a valid .ttf, .otf, .woff, or .woff2 file.')
     } finally {
-      URL.revokeObjectURL(fontUrl)
       e.target.value = ''
+    }
+  }
+
+  const handleFontFamilyChange = async (fontFamily: string) => {
+    setConfig(prev => ({ ...prev, fontFamily }))
+    const item = googleFontsCatalog.find(f => f.family === fontFamily)
+    if (item) {
+      await loadGoogleFontByItem(item)
+      void preloadNearbyGoogleFonts(fontFamily)
+      return
     }
   }
 
   // Auto-load fonts on component mount
   useEffect(() => {
     loadLocalFonts();
+    void loadGoogleFontsCatalog();
+    ;(async () => {
+      try {
+        const records = await getPersistedFonts()
+        const uploads = records.filter(r => r.source === 'upload').sort((a, b) => b.updatedAt - a.updatedAt)
+        const google = records.filter(r => r.source === 'google').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_GOOGLE_FONTS_IN_MEMORY)
+        const toLoad = [...uploads, ...google]
+
+        for (const rec of toLoad) {
+          await registerFontFace(rec.key, rec.family, rec.blob, rec.source)
+          addFontToList(rec.family)
+        }
+      } catch (err) {
+        console.error('Failed to restore persisted fonts:', err)
+      }
+    })()
   }, [])
 
   // --- Handlers ---
@@ -563,6 +812,7 @@ export default function App() {
     }
 
     setVerificationStatus(null)
+    preloadTicketRef.current += 1
     setIsGenerating(true)
 
     const zip = new JSZip()
@@ -961,10 +1211,15 @@ export default function App() {
                                   className="hidden"
                                  />
                                  <p className="text-[11px] text-slate-600 mb-1">Supported: .ttf, .otf, .woff, .woff2</p>
+                                 <p className="text-[11px] text-slate-600 mb-2">
+                                   Google Fonts list loads automatically. Pick any font from the dropdown.
+                                   {isLoadingGoogleFontsCatalog && ' Loading Google Fonts...'}
+                                 </p>
+
                                  <select 
                                     className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                     value={config.fontFamily}
-                                    onChange={(e) => setConfig({...config, fontFamily: e.target.value})}
+                                    onChange={(e) => { void handleFontFamilyChange(e.target.value) }}
                                  >
                                      {availableFonts.map(font => (
                                          <option key={font} value={font}>{font}</option>
