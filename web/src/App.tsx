@@ -1625,7 +1625,25 @@ export default function App() {
                                         <ChevronDown className="w-5 h-5" />
                                     </Button>
 
-                                    <span className="px-2 text-lg font-mono">{config.fontSize}</span>
+                                    <Input
+                                        type="number"
+                                        min={10}
+                                        max={300}
+                                        step={0.1}
+                                        value={config.fontSize}
+                                        onChange={(e) => {
+                                          const raw = e.target.value
+                                          const parsed = Number.parseFloat(raw)
+                                          if (Number.isNaN(parsed)) return
+                                          const oneDecimal = Math.round(parsed * 10) / 10
+                                          setConfig(prev => ({
+                                            ...prev,
+                                            fontSize: Math.max(10, Math.min(300, oneDecimal))
+                                          }))
+                                        }}
+                                        className="h-8 w-20 text-center font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                        title="Type font size"
+                                    />
 
                                     <Button
                                         variant="outline"
@@ -1646,7 +1664,24 @@ export default function App() {
                             </div>
 
                             <div className="space-y-2">
-                                <Label>Horizontal Position (X): {Math.round(config.x)}</Label>
+                                <div className="flex items-center justify-between gap-2">
+                                  <Label>Horizontal Position (X)</Label>
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    max={templateDimensions.width || 2000}
+                                    step={1}
+                                    value={Math.round(config.x)}
+                                    onChange={(e) => {
+                                      const parsed = Number.parseInt(e.target.value, 10)
+                                      if (Number.isNaN(parsed)) return
+                                      const maxX = templateDimensions.width || 2000
+                                      setConfig(prev => ({ ...prev, x: Math.max(0, Math.min(maxX, parsed)) }))
+                                    }}
+                                    className="h-8 w-24 text-center font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                    title="Type horizontal position"
+                                  />
+                                </div>
                                 <Slider 
                                     value={[config.x]} 
                                     min={0} max={templateDimensions.width || 2000} step={1} 
@@ -1655,7 +1690,24 @@ export default function App() {
                             </div>
 
                             <div className="space-y-2">
-                                <Label>Vertical Position (Y): {Math.round(config.y)}</Label>
+                                <div className="flex items-center justify-between gap-2">
+                                  <Label>Vertical Position (Y)</Label>
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    max={templateDimensions.height || 2000}
+                                    step={1}
+                                    value={Math.round(config.y)}
+                                    onChange={(e) => {
+                                      const parsed = Number.parseInt(e.target.value, 10)
+                                      if (Number.isNaN(parsed)) return
+                                      const maxY = templateDimensions.height || 2000
+                                      setConfig(prev => ({ ...prev, y: Math.max(0, Math.min(maxY, parsed)) }))
+                                    }}
+                                    className="h-8 w-24 text-center font-mono [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                    title="Type vertical position"
+                                  />
+                                </div>
                                 <Slider 
                                     value={[config.y]} 
                                     min={0} max={templateDimensions.height || 2000} step={1} 
