@@ -25,7 +25,6 @@ import { Slider } from "@/components/ui/slider"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
 import * as XLSX from "xlsx"
 import Papa from "papaparse"
-import JSZip from "jszip"
 import { saveAs } from "file-saver"
 import QRCode from "qrcode"
 
@@ -60,6 +59,7 @@ export default function App() {
   const [template, setTemplate] = useState<string | null>(null)
   const [templateDimensions, setTemplateDimensions] = useState({ width: 0, height: 0 })
   const [names, setNames] = useState<string[]>([])
+  const [positions, setPositions] = useState<string[]>([])
   
   // Advanced Data Handling State
   const [fileType, setFileType] = useState<'txt' | 'csv' | 'excel' | null>(null)
@@ -68,10 +68,14 @@ export default function App() {
   const [selectedSheet, setSelectedSheet] = useState<string>("")
   const [columns, setColumns] = useState<string[]>([])
   const [selectedColumn, setSelectedColumn] = useState<string>("")
+  const [selectedPositionColumn, setSelectedPositionColumn] = useState<string>("")
   const [rawData, setRawData] = useState<any[]>([]) // Stores the parsed JSON data from current sheet/CSV
 
   const [previewName, setPreviewName] = useState("Your Name Here")
+  const [previewPositionInput, setPreviewPositionInput] = useState("1")
   const [previewMode, setPreviewMode] = useState<'largest' | 'median' | 'smallest'>('largest')
+  const [certificateType, setCertificateType] = useState<'participation' | 'winner'>('participation')
+  const [positionFormat, setPositionFormat] = useState<'ordinal' | 'roman' | 'words'>('ordinal')
   const [zipName, setZipName] = useState("certificates")
   const [availableFonts, setAvailableFonts] = useState<string[]>([
     "Times New Roman", "Arial", "Courier New", "Georgia", "Verdana", "Trebuchet MS"
@@ -86,7 +90,18 @@ export default function App() {
     fontFamily: "Times New Roman",
     textTransform: "capitalize" as "none" | "uppercase" | "lowercase" | "capitalize"
   })
+  const [positionConfig, setPositionConfig] = useState({
+    x: 100,
+    y: 180,
+    fontSize: 40,
+    color: "#000000",
+    fontFamily: "Times New Roman",
+    textTransform: "none" as "none" | "uppercase" | "lowercase" | "capitalize"
+  })
   const [isGenerating, setIsGenerating] = useState(false)
+  const [generationProgress, setGenerationProgress] = useState(0)
+  const [generationPhase, setGenerationPhase] = useState<'idle' | 'rendering' | 'batch-zipping'>('idle')
+  const [generationBatchLabel, setGenerationBatchLabel] = useState('')
   const [verificationStatus, setVerificationStatus] = useState<{
     type: 'success' | 'error' | 'warning'
     message: string
@@ -102,6 +117,9 @@ export default function App() {
   const [eventName, setEventName] = useState("")
   const [eventDate, setEventDate] = useState(new Date().toISOString().split('T')[0])
   const [qrConfig, setQrConfig] = useState({ x: 20, y: 20, size: 188 })
+  const [moveTarget, setMoveTarget] = useState<'name' | 'position' | 'qr'>('name')
+  const qrAutoPositionedRef = useRef(false)
+  const nameAutoCenteredRef = useRef(false)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fontUploadRef = useRef<HTMLInputElement>(null)
@@ -109,7 +127,15 @@ export default function App() {
   const googleFontLruRef = useRef<string[]>([])
   const googleFontLoadInFlightRef = useRef<Map<string, Promise<void>>>(new Map())
   const preloadTicketRef = useRef(0)
-  type DragMode = 'none' | 'text' | 'qr' | 'qr-resize'
+  const customFontDataRef = useRef<Map<string, ArrayBuffer>>(new Map())
+  const templateImageRef = useRef<HTMLImageElement | null>(null)
+  const previewQrCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const previewQrSizeRef = useRef(0)
+  const previewDrawInProgressRef = useRef(false)
+  const previewDrawQueuedRef = useRef(false)
+  const dragRafRef = useRef<number | null>(null)
+  const latestMouseRef = useRef({ x: 0, y: 0 })
+  type DragMode = 'none' | 'text' | 'position' | 'qr' | 'qr-resize'
   const [dragMode, setDragMode] = useState<DragMode>('none')
   const dragStart = useRef({ x: 0, y: 0 })
   const resizeStart = useRef({ size: 120, originX: 0, originY: 0 })
@@ -335,10 +361,12 @@ export default function App() {
 
     const baseName = file.name.replace(/\.[^.]+$/, '').trim() || 'Custom Font'
     const key = `upload:${baseName}`
+    const fontBinary = await file.arrayBuffer()
 
     try {
       await registerFontFace(key, baseName, file, 'upload')
       await savePersistedFont({ key, family: baseName, source: 'upload', blob: file, updatedAt: Date.now() })
+      customFontDataRef.current.set(baseName, fontBinary)
 
       addFontToList(baseName)
       setConfig(prev => ({ ...prev, fontFamily: baseName }))
@@ -432,23 +460,40 @@ export default function App() {
         const autoColor = getAutoContrastTextColor(img)
         setTemplateDimensions({ width: img.width, height: img.height })
         setTemplate(event.target?.result as string)
-        // Reset position to center approximately
-        setConfig(prev => ({ ...prev, x: img.width / 2, y: img.height / 2, color: autoColor }))
+        setConfig(prev => {
+          const next = { ...prev, color: autoColor }
+          if (!nameAutoCenteredRef.current) {
+            next.x = img.width / 2
+            next.y = img.height / 2
+            nameAutoCenteredRef.current = true
+          }
+          return next
+        })
       }
       img.src = event.target?.result as string
     }
     reader.readAsDataURL(file)
   }
 
-  // Effect to update names when column selection changes
+  // Effect to update names (and winner positions) when column selection changes
   useEffect(() => {
     if (fileType === 'txt' || !selectedColumn || rawData.length === 0) return
 
-    const newNames = rawData.map((row: any) => String(row[selectedColumn] || "").trim()).filter(n => n)
-    setNames(newNames)
-  }, [selectedColumn, rawData, fileType])
+    const paired = rawData
+      .map((row: any) => {
+        const name = String(row[selectedColumn] || "").trim()
+        const position = certificateType === 'winner' && selectedPositionColumn
+          ? String(row[selectedPositionColumn] ?? '').trim()
+          : ''
+        return { name, position }
+      })
+      .filter(r => r.name)
 
-  // Effect to update preview name based on mode when names change
+    setNames(paired.map(r => r.name))
+    setPositions(paired.map(r => r.position))
+  }, [selectedColumn, selectedPositionColumn, rawData, fileType, certificateType])
+
+  // Effect to update preview name/position based on mode when names change
   useEffect(() => {
     if (names.length === 0) return
     
@@ -466,7 +511,16 @@ export default function App() {
         setPreviewName(sortedByLength[midIndex])
         break
     }
-  }, [names, previewMode])
+
+    if (certificateType === 'winner') {
+      const targetName =
+        previewMode === 'largest' ? sortedByLength[0] :
+        previewMode === 'smallest' ? sortedByLength[sortedByLength.length - 1] :
+        sortedByLength[Math.floor(sortedByLength.length / 2)]
+      const idx = names.findIndex(n => n === targetName)
+      setPreviewPositionInput((positions[idx] || String((idx >= 0 ? idx : 0) + 1)).trim())
+    }
+  }, [names, positions, previewMode, certificateType])
 
   // Effect to handle sheet change for Excel
   useEffect(() => {
@@ -481,6 +535,7 @@ export default function App() {
         setRawData([])
         setColumns([])
         setNames([])
+      setPositions([])
         return
     }
 
@@ -493,8 +548,15 @@ export default function App() {
     
     if (cols.length > 0) {
         setSelectedColumn(cols[0])
+      setSelectedPositionColumn(cols[0])
     }
   }, [selectedSheet, workbook, fileType])
+
+  useEffect(() => {
+    if (certificateType === 'winner' && !selectedPositionColumn && columns.length > 0) {
+      setSelectedPositionColumn(columns[0])
+    }
+  }, [certificateType, selectedPositionColumn, columns])
 
 
   const handleDataUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -505,20 +567,33 @@ export default function App() {
     
     // Reset states
     setNames([])
+    setPositions([])
     setRawData([])
     setColumns([])
     setSheetNames([])
     setWorkbook(null)
     setSelectedSheet("")
     setSelectedColumn("")
+    setSelectedPositionColumn("")
 
     if (ext === "txt") {
       setFileType('txt')
       const reader = new FileReader()
       reader.onload = (event) => {
         const text = event.target?.result as string
-        const parsedNames = text.split("\n").map(n => n.trim()).filter(n => n)
-        setNames(parsedNames)
+        const lines = text.split("\n").map(n => n.trim()).filter(n => n)
+        if (certificateType === 'winner') {
+          const parsed = lines.map((line) => {
+            const m = line.match(/^(.*?)\s*#\s*(.+)$/)
+            if (!m) return { name: line, position: '' }
+            return { name: m[1].trim(), position: m[2].trim() }
+          }).filter(r => r.name)
+          setNames(parsed.map(r => r.name))
+          setPositions(parsed.map(r => r.position))
+        } else {
+          setNames(lines)
+          setPositions([])
+        }
       }
       reader.readAsText(file)
     } else if (ext === "csv") {
@@ -532,7 +607,10 @@ export default function App() {
                 if (data.length > 0) {
                     const cols = Object.keys(data[0])
                     setColumns(cols)
-                    if (cols.length > 0) setSelectedColumn(cols[0])
+                  if (cols.length > 0) {
+                    setSelectedColumn(cols[0])
+                    setSelectedPositionColumn(cols[0])
+                  }
                 }
             }
         })
@@ -554,6 +632,20 @@ export default function App() {
 
   // --- Drawing Logic ---
 
+  useEffect(() => {
+    if (!template) {
+      templateImageRef.current = null
+      return
+    }
+
+    const img = new Image()
+    img.onload = () => {
+      templateImageRef.current = img
+      drawPreview()
+    }
+    img.src = template
+  }, [template])
+
   const applyTextTransform = (text: string, transform: string) => {
     switch (transform) {
       case "uppercase": return text.toUpperCase();
@@ -565,20 +657,125 @@ export default function App() {
     }
   }
 
-  const drawPreview = async () => {
-    const canvas = canvasRef.current
-    if (!canvas || !template) return
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
+  const toOrdinal = (n: number) => {
+    const v = n % 100
+    if (v >= 11 && v <= 13) return `${n}th`
+    switch (n % 10) {
+      case 1: return `${n}st`
+      case 2: return `${n}nd`
+      case 3: return `${n}rd`
+      default: return `${n}th`
+    }
+  }
 
-    await new Promise<void>((resolve) => {
-      const img = new Image()
-      img.onload = async () => {
+  const toRoman = (n: number) => {
+    if (!Number.isFinite(n) || n <= 0) return String(n)
+    const map: Array<[number, string]> = [
+      [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'],
+      [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'],
+      [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']
+    ]
+    let num = n
+    let out = ''
+    for (const [value, symbol] of map) {
+      while (num >= value) {
+        out += symbol
+        num -= value
+      }
+    }
+    return out
+  }
+
+  const cardinalToWords = (n: number): string => {
+    const ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']
+    const teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+    const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
+
+    if (n === 0) return 'zero'
+    if (n < 10) return ones[n]
+    if (n < 20) return teens[n - 10]
+    if (n < 100) {
+      const t = Math.floor(n / 10)
+      const o = n % 10
+      return o ? `${tens[t]} ${ones[o]}` : tens[t]
+    }
+    if (n < 1000) {
+      const h = Math.floor(n / 100)
+      const r = n % 100
+      return r ? `${ones[h]} hundred ${cardinalToWords(r)}` : `${ones[h]} hundred`
+    }
+    if (n < 1_000_000) {
+      const th = Math.floor(n / 1000)
+      const r = n % 1000
+      return r ? `${cardinalToWords(th)} thousand ${cardinalToWords(r)}` : `${cardinalToWords(th)} thousand`
+    }
+    return String(n)
+  }
+
+  const wordsToOrdinal = (s: string): string => {
+    const specials: Record<string, string> = {
+      one: 'first', two: 'second', three: 'third', four: 'fourth', five: 'fifth',
+      six: 'sixth', seven: 'seventh', eight: 'eighth', nine: 'ninth', ten: 'tenth',
+      eleven: 'eleventh', twelve: 'twelfth', thirteen: 'thirteenth', fourteen: 'fourteenth',
+      fifteen: 'fifteenth', sixteen: 'sixteenth', seventeen: 'seventeenth',
+      eighteen: 'eighteenth', nineteen: 'nineteenth', twenty: 'twentieth',
+      thirty: 'thirtieth', forty: 'fortieth', fifty: 'fiftieth', sixty: 'sixtieth',
+      seventy: 'seventieth', eighty: 'eightieth', ninety: 'ninetieth',
+      hundred: 'hundredth', thousand: 'thousandth'
+    }
+    const parts = s.trim().split(/\s+/)
+    if (parts.length === 0) return s
+    const last = parts[parts.length - 1].toLowerCase()
+    parts[parts.length - 1] = specials[last] || `${last}th`
+    return parts.join(' ')
+  }
+
+  const normalizePositionText = (raw: string, fallbackRank: number) => {
+    const v = String(raw || '').trim()
+    const n = /^\d+$/.test(v) ? parseInt(v, 10) : (fallbackRank > 0 ? fallbackRank : NaN)
+    if (!Number.isFinite(n) || n <= 0) return v || String(fallbackRank)
+
+    if (positionFormat === 'roman') return toRoman(n)
+    if (positionFormat === 'words') return wordsToOrdinal(cardinalToWords(n))
+    return toOrdinal(n)
+  }
+
+  const ensurePreviewQrCanvas = async (size: number) => {
+    if (previewQrCanvasRef.current && previewQrSizeRef.current === size) {
+      return previewQrCanvasRef.current
+    }
+
+    const qrCanvas = document.createElement('canvas')
+    await QRCode.toCanvas(qrCanvas, 'https://example.com/verify/preview', {
+      width: size,
+      margin: 1
+    })
+    previewQrCanvasRef.current = qrCanvas
+    previewQrSizeRef.current = size
+    return qrCanvas
+  }
+
+  const drawPreview = async () => {
+    if (previewDrawInProgressRef.current) {
+      previewDrawQueuedRef.current = true
+      return
+    }
+
+    previewDrawInProgressRef.current = true
+
+    try {
+      do {
+        previewDrawQueuedRef.current = false
+
+    const canvas = canvasRef.current
+        const img = templateImageRef.current
+        if (!canvas || !template || !img) continue
+    const ctx = canvas.getContext("2d")
+        if (!ctx) continue
+
         canvas.width = img.width
         canvas.height = img.height
         ctx.drawImage(img, 0, 0)
-
-        try { await document.fonts.load(`${config.fontSize}px "${config.fontFamily}"`) } catch { /* no-op */ }
 
         ctx.font = `${config.fontSize}px "${config.fontFamily}"`
         ctx.fillStyle = config.color
@@ -587,13 +784,19 @@ export default function App() {
         const transformedText = applyTextTransform(previewName, config.textTransform)
         ctx.fillText(transformedText, config.x, config.y)
 
+        if (certificateType === 'winner') {
+          ctx.font = `${positionConfig.fontSize}px "${positionConfig.fontFamily}"`
+          ctx.fillStyle = positionConfig.color
+          ctx.textAlign = "center"
+          ctx.textBaseline = "middle"
+          const pos = normalizePositionText(previewPositionInput, 1)
+          const transformedPos = applyTextTransform(pos, positionConfig.textTransform)
+          ctx.fillText(transformedPos, positionConfig.x, positionConfig.y)
+        }
+
         if (verificationEnabled) {
           try {
-            const qrCanvas = document.createElement('canvas')
-            await QRCode.toCanvas(qrCanvas, 'https://example.com/verify/preview', {
-              width: qrConfig.size,
-              margin: 1
-            })
+            const qrCanvas = await ensurePreviewQrCanvas(qrConfig.size)
             ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
 
             // Dashed blue selection border
@@ -615,24 +818,38 @@ export default function App() {
             console.error('QR preview render failed:', err)
           }
         }
-        resolve()
-      }
-      img.src = template
-    })
+      } while (previewDrawQueuedRef.current)
+    } finally {
+      previewDrawInProgressRef.current = false
+    }
   }
 
   useEffect(() => {
     drawPreview()
-  }, [template, config, previewName, verificationEnabled, qrConfig])
+  }, [template, config, positionConfig, previewName, previewPositionInput, certificateType, verificationEnabled, qrConfig, positionFormat])
 
-  // When template dimensions change (new image uploaded) and QR is on, snap to bottom-left
   useEffect(() => {
-    if (verificationEnabled && templateDimensions.height > 0) {
+    let cancelled = false
+    const loadFonts = async () => {
+      try { await document.fonts.load(`${config.fontSize}px "${config.fontFamily}"`) } catch { /* no-op */ }
+      if (certificateType === 'winner') {
+        try { await document.fonts.load(`${positionConfig.fontSize}px "${positionConfig.fontFamily}"`) } catch { /* no-op */ }
+      }
+      if (!cancelled) drawPreview()
+    }
+    loadFonts()
+    return () => { cancelled = true }
+  }, [config.fontFamily, config.fontSize, positionConfig.fontFamily, positionConfig.fontSize, certificateType])
+
+  // Place QR to bottom-left only once (first time verification is enabled with a loaded template)
+  useEffect(() => {
+    if (verificationEnabled && templateDimensions.height > 0 && !qrAutoPositionedRef.current) {
       const size = 188
       const margin = 20
       setQrConfig({ x: margin, y: templateDimensions.height - size - margin, size })
+      qrAutoPositionedRef.current = true
     }
-  }, [templateDimensions])
+  }, [verificationEnabled, templateDimensions])
 
   // --- Drag / Resize Helpers ---
 
@@ -646,41 +863,46 @@ export default function App() {
     }
   }
 
-  const getHitTarget = (mouseX: number, mouseY: number): DragMode => {
-    if (verificationEnabled) {
-      const inQrX = mouseX >= qrConfig.x && mouseX <= qrConfig.x + qrConfig.size
-      const inQrY = mouseY >= qrConfig.y && mouseY <= qrConfig.y + qrConfig.size
-      if (inQrX && inQrY) {
-        const resizeZone = qrConfig.size * 0.28
-        if (
-          mouseX >= qrConfig.x + qrConfig.size - resizeZone &&
-          mouseY >= qrConfig.y + qrConfig.size - resizeZone
-        ) return 'qr-resize'
-        return 'qr'
-      }
-    }
-    return 'text'
-  }
+  const getQrTarget = (mouseX: number, mouseY: number): 'qr' | 'qr-resize' | null => {
+    if (!verificationEnabled) return null
+    const inQrX = mouseX >= qrConfig.x && mouseX <= qrConfig.x + qrConfig.size
+    const inQrY = mouseY >= qrConfig.y && mouseY <= qrConfig.y + qrConfig.size
+    if (!inQrX || !inQrY) return null
 
-  const getCursorForTarget = (target: DragMode) => {
-    if (target === 'qr-resize') return 'nwse-resize'
-    if (target === 'qr') return 'grab'
-    return 'move'
+    const resizeZone = qrConfig.size * 0.28
+    if (
+      mouseX >= qrConfig.x + qrConfig.size - resizeZone &&
+      mouseY >= qrConfig.y + qrConfig.size - resizeZone
+    ) return 'qr-resize'
+
+    return 'qr'
   }
 
   // --- Dragging Logic ---
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const { x: mouseX, y: mouseY } = getCanvasCoords(e)
-    const target = getHitTarget(mouseX, mouseY)
-    setDragMode(target)
+    if (moveTarget === 'qr' && verificationEnabled) {
+      const qrTarget = getQrTarget(mouseX, mouseY)
+      const target = qrTarget || 'qr'
+      setDragMode(target)
+      if (target === 'qr') {
+        dragStart.current = { x: mouseX - qrConfig.x, y: mouseY - qrConfig.y }
+      } else {
+        resizeStart.current = { size: qrConfig.size, originX: mouseX, originY: mouseY }
+      }
+      return
+    }
 
-    if (target === 'text') {
+    if (moveTarget === 'position' && certificateType === 'winner') {
+      setDragMode('position')
+      dragStart.current = { x: mouseX - positionConfig.x, y: mouseY - positionConfig.y }
+      return
+    }
+
+    setDragMode('text')
+    {
       dragStart.current = { x: mouseX - config.x, y: mouseY - config.y }
-    } else if (target === 'qr') {
-      dragStart.current = { x: mouseX - qrConfig.x, y: mouseY - qrConfig.y }
-    } else if (target === 'qr-resize') {
-      resizeStart.current = { size: qrConfig.size, originX: mouseX, originY: mouseY }
     }
   }
 
@@ -690,47 +912,80 @@ export default function App() {
 
     // Update cursor on hover (even without dragging)
     if (dragMode === 'none' && canvas) {
-      canvas.style.cursor = getCursorForTarget(getHitTarget(mouseX, mouseY))
+      if (moveTarget === 'qr' && verificationEnabled) {
+        const q = getQrTarget(mouseX, mouseY)
+        canvas.style.cursor = q === 'qr-resize' ? 'nwse-resize' : 'grab'
+      } else {
+        canvas.style.cursor = 'move'
+      }
     }
 
     if (dragMode === 'none') return
 
-    if (dragMode === 'text') {
-      setConfig(prev => ({
-        ...prev,
-        x: mouseX - dragStart.current.x,
-        y: mouseY - dragStart.current.y
-      }))
-    } else if (dragMode === 'qr') {
-      if (canvas) canvas.style.cursor = 'grabbing'
-      setQrConfig(prev => {
-        const maxX = Math.max(0, templateDimensions.width - prev.size)
-        const maxY = Math.max(0, templateDimensions.height - prev.size)
-        return {
+    latestMouseRef.current = { x: mouseX, y: mouseY }
+    if (dragRafRef.current !== null) return
+
+    dragRafRef.current = window.requestAnimationFrame(() => {
+      dragRafRef.current = null
+      const { x, y } = latestMouseRef.current
+
+      if (dragMode === 'text') {
+        setConfig(prev => ({
           ...prev,
-          x: Math.max(0, Math.min(maxX, mouseX - dragStart.current.x)),
-          y: Math.max(0, Math.min(maxY, mouseY - dragStart.current.y))
-        }
-      })
-    } else if (dragMode === 'qr-resize') {
-      if (canvas) canvas.style.cursor = 'nwse-resize'
-      const delta = (mouseX - resizeStart.current.originX + mouseY - resizeStart.current.originY) / 2
-      setQrConfig(prev => {
-        const maxSize = Math.min(
-          templateDimensions.width ? templateDimensions.width - prev.x : 600,
-          templateDimensions.height ? templateDimensions.height - prev.y : 600
-        )
-        const newSize = Math.round(Math.max(40, Math.min(maxSize, resizeStart.current.size + delta)))
-        return { ...prev, size: newSize }
-      })
-    }
+          x: x - dragStart.current.x,
+          y: y - dragStart.current.y
+        }))
+      } else if (dragMode === 'position') {
+        setPositionConfig(prev => ({
+          ...prev,
+          x: x - dragStart.current.x,
+          y: y - dragStart.current.y
+        }))
+      } else if (dragMode === 'qr') {
+        if (canvas) canvas.style.cursor = 'grabbing'
+        setQrConfig(prev => {
+          const maxX = Math.max(0, templateDimensions.width - prev.size)
+          const maxY = Math.max(0, templateDimensions.height - prev.size)
+          return {
+            ...prev,
+            x: Math.max(0, Math.min(maxX, x - dragStart.current.x)),
+            y: Math.max(0, Math.min(maxY, y - dragStart.current.y))
+          }
+        })
+      } else if (dragMode === 'qr-resize') {
+        if (canvas) canvas.style.cursor = 'nwse-resize'
+        const delta = (x - resizeStart.current.originX + y - resizeStart.current.originY) / 2
+        setQrConfig(prev => {
+          const maxSize = Math.min(
+            templateDimensions.width ? templateDimensions.width - prev.x : 600,
+            templateDimensions.height ? templateDimensions.height - prev.y : 600
+          )
+          const newSize = Math.round(Math.max(40, Math.min(maxSize, resizeStart.current.size + delta)))
+          return { ...prev, size: newSize }
+        })
+      }
+    })
   }
 
   const handleMouseUp = () => {
+    if (dragRafRef.current !== null) {
+      window.cancelAnimationFrame(dragRafRef.current)
+      dragRafRef.current = null
+    }
     setDragMode('none')
     const canvas = canvasRef.current
-    if (canvas) canvas.style.cursor = 'move'
+    if (!canvas) return
+    if (moveTarget === 'qr' && verificationEnabled) canvas.style.cursor = 'grab'
+    else canvas.style.cursor = 'move'
   }
+
+  useEffect(() => {
+    return () => {
+      if (dragRafRef.current !== null) {
+        window.cancelAnimationFrame(dragRafRef.current)
+      }
+    }
+  }, [])
 
   // --- Generation Logic ---
 
@@ -786,8 +1041,77 @@ export default function App() {
     if (normalized) setVerificationServerUrl(normalized)
   }
 
+  const requestMultipleDownloadPermission = async (totalBatches: number): Promise<'batch' | 'single'> => {
+    if (totalBatches <= 1) return 'single'
+
+    const getAutoDownloadPermissionStatus = async (): Promise<PermissionStatus | null> => {
+      if (!navigator.permissions?.query) return null
+      try {
+        return await navigator.permissions.query({ name: 'automatic-downloads' as PermissionName })
+      } catch {
+        return null
+      }
+    }
+
+    const getAutoDownloadPermissionState = async (): Promise<'granted' | 'denied' | 'prompt' | 'unsupported'> => {
+      const status = await getAutoDownloadPermissionStatus()
+      if (!status) return 'unsupported'
+      if (status.state === 'granted') return 'granted'
+      if (status.state === 'denied') return 'denied'
+      return 'prompt'
+    }
+
+    const triggerProbe = (index: number) => {
+      const probeBlob = new Blob([`certimaster-download-permission-probe-${index}`], { type: 'text/plain' })
+      const url = URL.createObjectURL(probeBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `certimaster_permission_probe_${index}.txt`
+      a.style.display = 'none'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+
+    const pollPermissionState = async (attempts: number, delayMs: number) => {
+      let last: 'granted' | 'denied' | 'prompt' | 'unsupported' = 'unsupported'
+      for (let i = 0; i < attempts; i++) {
+        last = await getAutoDownloadPermissionState()
+        if (last === 'granted') return 'granted' as const
+        if (last === 'denied') return 'denied' as const
+        await new Promise<void>(resolve => window.setTimeout(resolve, delayMs))
+      }
+      return last
+    }
+
+    const initialState = await pollPermissionState(2, 120)
+    if (initialState === 'granted') return 'batch'
+
+    const askBatch = window.confirm(
+      `This run will download ${totalBatches} ZIP files (one per batch).\n\n` +
+      `Press OK to request browser permission for multiple downloads now.\n\n` +
+      `Press Cancel to continue in single ZIP mode (safer downloads, but your system may be slower during generation).`
+    )
+    if (!askBatch) return 'single'
+
+    triggerProbe(1)
+    await new Promise<void>(resolve => window.setTimeout(resolve, 150))
+    triggerProbe(2)
+    await new Promise<void>(resolve => window.setTimeout(resolve, 350))
+
+    const afterPromptState = await pollPermissionState(10, 180)
+    if (afterPromptState === 'denied') return 'single'
+    return 'batch'
+  }
+
   const generateCertificates = async () => {
     if (!template || names.length === 0) return
+
+    if (certificateType === 'winner' && (fileType === 'csv' || fileType === 'excel') && !selectedPositionColumn) {
+      setVerificationStatus({ type: 'warning', message: 'Winner mode requires a Position column selection.' })
+      return
+    }
 
     let baseUrl: string | null = null
 
@@ -850,60 +1174,130 @@ export default function App() {
       }
     }
 
-    setVerificationStatus(null)
+    const supportsWorkerRendering = typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap !== 'undefined'
+    if (!supportsWorkerRendering) {
+      setVerificationStatus({
+        type: 'error',
+        message: 'This browser does not support worker-based certificate rendering (OffscreenCanvas). Use a Chromium-based browser.'
+      })
+      return
+    }
+
+    const suggestedBatchSize = names.length >= 500 ? 30 : names.length >= 200 ? 40 : 60
+    let effectiveBatchSize = suggestedBatchSize
+    let preflightWarning: string | null = null
+
+    const totalBatches = Math.max(1, Math.ceil(names.length / Math.max(1, suggestedBatchSize)))
+
+    if (totalBatches > 1) {
+      const generationMode = await requestMultipleDownloadPermission(totalBatches)
+      if (generationMode === 'single') {
+        effectiveBatchSize = names.length
+        preflightWarning = 'Multiple-download permission was not granted. Continuing with a single ZIP download. This can be slower and heavier on your system because all processing happens locally.'
+      }
+    }
+
+    setVerificationStatus(preflightWarning ? { type: 'warning', message: preflightWarning } : null)
     preloadTicketRef.current += 1
     setIsGenerating(true)
+    setGenerationProgress(0)
+    setGenerationPhase('rendering')
+    setGenerationBatchLabel('')
 
-    const zip = new JSZip()
-    const canvas = document.createElement("canvas")
-    const ctx = canvas.getContext("2d")
-    if (!ctx) { setIsGenerating(false); return }
+    type WorkerProgress = {
+      type: 'progress'
+      processed: number
+      total: number
+      batchIndex: number
+      totalBatches: number
+      phase: 'rendering' | 'batch-zipping'
+    }
 
-    const img = new Image()
-    img.src = template
+    type WorkerBatchReady = {
+      type: 'batch-ready'
+      batchIndex: number
+      totalBatches: number
+      zipBuffer: ArrayBuffer
+      zipFileName: string
+    }
 
-    await new Promise((resolve) => {
-      img.onload = resolve
-      if (img.complete) resolve(true)
-    })
+    type WorkerDone = {
+      type: 'done'
+      verificationRecords: { id: string; name: string; event: string; date: string }[]
+    }
 
-    canvas.width = img.width
-    canvas.height = img.height
+    type WorkerError = {
+      type: 'error'
+      message: string
+    }
 
-    try { await document.fonts.load(`${config.fontSize}px "${config.fontFamily}"`) } catch { /* no-op */ }
+    const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
+    const zipBase = (zipName || 'certificates').trim() || 'certificates'
 
-    // Collect verification records to batch-save at end
-    const batchRecords: { id: string; name: string; event: string; date: string }[] = []
+    const selectedFamilies = new Set<string>([config.fontFamily])
+    if (certificateType === 'winner') selectedFamilies.add(positionConfig.fontFamily)
+    const customFontsForWorker = Array.from(selectedFamilies)
+      .map((family) => {
+        const data = customFontDataRef.current.get(family)
+        if (!data) return null
+        return { family, data: data.slice(0) }
+      })
+      .filter((f): f is { family: string; data: ArrayBuffer } => Boolean(f))
+    const customFontTransfers = customFontsForWorker.map((f) => f.data)
 
-    for (let i = 0; i < names.length; i++) {
-      const name = names[i]
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(img, 0, 0)
+    const workerResult = await new Promise<{ records: { id: string; name: string; event: string; date: string }[] }>((resolve, reject) => {
+      worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerBatchReady | WorkerDone | WorkerError>) => {
+        const message = event.data
+        if (message.type === 'progress') {
+          setGenerationPhase(message.phase)
+          setGenerationProgress(Math.round((message.processed / Math.max(1, message.total)) * 100))
+          setGenerationBatchLabel(`Batch ${message.batchIndex}/${message.totalBatches}`)
+          return
+        }
 
-      ctx.font = `${config.fontSize}px "${config.fontFamily}"`
-      ctx.fillStyle = config.color
-      ctx.textAlign = "center"
-      ctx.textBaseline = "middle"
-      const transformedName = applyTextTransform(name, config.textTransform)
-      ctx.fillText(transformedName, config.x, config.y)
+        if (message.type === 'batch-ready') {
+          const blob = new Blob([message.zipBuffer], { type: 'application/zip' })
+          saveAs(blob, message.zipFileName)
+          return
+        }
 
-      // Draw QR code if verification is enabled
-      if (verificationEnabled && baseUrl) {
-        const id = crypto.randomUUID()
-        batchRecords.push({ id, name, event: eventName, date: eventDate })
+        if (message.type === 'done') {
+          resolve({ records: message.verificationRecords })
+          return
+        }
 
-        const qrUrl = `${baseUrl}/verify/${id}`
-        const qrCanvas = document.createElement('canvas')
-        await QRCode.toCanvas(qrCanvas, qrUrl, { width: qrConfig.size, margin: 1 })
-        ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
+        reject(new Error(message.message || 'Worker generation failed'))
       }
 
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"))
-      if (blob) zip.file(`${name}.png`, blob)
+      worker.onerror = (err) => {
+        reject(new Error(err.message || 'Worker crashed during generation'))
+      }
 
-      // Yield to UI thread every 10 items to avoid freezing
-      if (i % 10 === 0) await new Promise(r => setTimeout(r, 0))
-    }
+      worker.postMessage({
+        type: 'start',
+        payload: {
+          templateDataUrl: template,
+          names,
+          positions,
+          certificateType,
+          positionFormat,
+          config,
+          positionConfig,
+          verificationEnabled,
+          verificationBaseUrl: baseUrl,
+          eventName,
+          eventDate,
+          qrConfig,
+          batchSize: effectiveBatchSize,
+          zipBaseName: zipBase,
+          customFonts: customFontsForWorker
+        }
+      }, customFontTransfers)
+    }).finally(() => {
+      worker.terminate()
+    })
+
+    const batchRecords = workerResult.records
 
     // Batch-save all verification records to the backend
     if (verificationEnabled && batchRecords.length > 0) {
@@ -956,9 +1350,10 @@ export default function App() {
       setVerificationStatus(null)
     }
 
-    const content = await zip.generateAsync({ type: "blob" })
-    saveAs(content, `${zipName || 'certificates'}.zip`)
     setIsGenerating(false)
+    setGenerationPhase('idle')
+    setGenerationProgress(0)
+    setGenerationBatchLabel('')
   }
 
   const testVerificationConnection = async () => {
@@ -1102,11 +1497,63 @@ export default function App() {
                          </div>
                          
                          <p className="text-xs text-muted-foreground">
-                            {names.length > 0 ? <span className="text-green-600 font-medium">{names.length} names loaded</span> : "No names loaded"}
+                           {names.length > 0
+                            ? <span className="text-green-600 font-medium">{names.length} names loaded{certificateType === 'winner' ? `, ${positions.filter(Boolean).length} positions found` : ''}</span>
+                            : "No names loaded"}
                          </p>
                     </div>
 
                     <div className="pt-4 border-t space-y-3">
+                      <div className="flex items-center gap-3">
+                        <Label className="whitespace-nowrap">Certificate Type</Label>
+                        <select
+                          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          value={certificateType}
+                          onChange={(e) => setCertificateType(e.target.value as 'participation' | 'winner')}
+                        >
+                          <option value="participation">Participation</option>
+                          <option value="winner">Winner</option>
+                        </select>
+                      </div>
+
+                      {certificateType === 'winner' && (
+                        <>
+                          {(fileType === 'csv' || fileType === 'excel') && columns.length > 0 && (
+                            <div className="space-y-1">
+                              <Label className="text-xs text-slate-500">Select Position Column</Label>
+                              <select
+                                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                value={selectedPositionColumn}
+                                onChange={(e) => setSelectedPositionColumn(e.target.value)}
+                              >
+                                {columns.map(col => (
+                                  <option key={col} value={col}>{col}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
+                          <div className="space-y-1">
+                            <Label className="text-xs text-slate-500">Position Display Format</Label>
+                            <select
+                              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                              value={positionFormat}
+                              onChange={(e) => setPositionFormat(e.target.value as 'ordinal' | 'roman' | 'words')}
+                            >
+                              <option value="ordinal">1st, 2nd, 3rd, 4th...</option>
+                              <option value="roman">I, II, III, IV...</option>
+                              <option value="words">First, Second, Third...</option>
+                            </select>
+                          </div>
+
+                          <p className="text-xs text-slate-600 bg-slate-50 border rounded-md p-2">
+                            Winner mode input guide: CSV/Excel should contain a position column (usually numbers like 1, 2, 3...).
+                            For TXT file, use one per line in this format: <span className="font-mono">Name # number</span>
+                            (example: <span className="font-mono">Akhil # 1</span>).
+                          </p>
+                        </>
+                      )}
+
                         <div className="flex items-center gap-3">
                             <Label className="whitespace-nowrap">Preview Mode</Label>
                             <select 
@@ -1127,6 +1574,32 @@ export default function App() {
                                 placeholder="Or enter custom name"
                             />
                         </div>
+                        {certificateType === 'winner' && (
+                          <div className="flex items-center gap-3">
+                            <Label className="whitespace-nowrap">Preview Position</Label>
+                            <Input
+                              value={previewPositionInput}
+                              onChange={(e) => setPreviewPositionInput(e.target.value)}
+                              placeholder="1"
+                            />
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-3">
+                          <Label className="whitespace-nowrap">Drag Target</Label>
+                          <select
+                            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            value={moveTarget}
+                            onChange={(e) => setMoveTarget(e.target.value as 'name' | 'position' | 'qr')}
+                          >
+                            <option value="name">Name Text</option>
+                            {certificateType === 'winner' && <option value="position">Position Text</option>}
+                            {verificationEnabled && <option value="qr">QR Code</option>}
+                          </select>
+                        </div>
+                        <p className="text-xs text-slate-600">
+                          Drag anywhere on the preview canvas to move the selected target.
+                        </p>
                     </div>
 
                     {/* Controls */}
@@ -1215,6 +1688,96 @@ export default function App() {
                                     </select>
                                 </div>
                             </div>
+
+                            {certificateType === 'winner' && (
+                              <div className="md:col-span-2 border rounded-md p-3 bg-slate-50 space-y-3">
+                                <Label className="text-sm font-semibold">Position Text Controls</Label>
+
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm">Position font size</span>
+                                  <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() => setPositionConfig(prev => ({ ...prev, fontSize: Math.max(10, prev.fontSize - 1) }))}
+                                    disabled={positionConfig.fontSize <= 10}
+                                  >
+                                    <ChevronDown className="w-5 h-5" />
+                                  </Button>
+                                  <span className="px-2 text-lg font-mono">{positionConfig.fontSize}</span>
+                                  <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() => setPositionConfig(prev => ({ ...prev, fontSize: Math.min(300, prev.fontSize + 1) }))}
+                                    disabled={positionConfig.fontSize >= 300}
+                                  >
+                                    <ChevronUp className="w-5 h-5" />
+                                  </Button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  <div className="space-y-2">
+                                    <Label>Position X: {Math.round(positionConfig.x)}</Label>
+                                    <Slider
+                                      value={[positionConfig.x]}
+                                      min={0}
+                                      max={templateDimensions.width || 2000}
+                                      step={1}
+                                      onValueChange={(val) => setPositionConfig(prev => ({ ...prev, x: val[0] }))}
+                                    />
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <Label>Position Y: {Math.round(positionConfig.y)}</Label>
+                                    <Slider
+                                      value={[positionConfig.y]}
+                                      min={0}
+                                      max={templateDimensions.height || 2000}
+                                      step={1}
+                                      onValueChange={(val) => setPositionConfig(prev => ({ ...prev, y: val[0] }))}
+                                    />
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <Label>Position Color</Label>
+                                    <input
+                                      type="color"
+                                      className="h-9 w-full rounded-md border border-input bg-background p-1 cursor-pointer"
+                                      value={positionConfig.color}
+                                      onChange={(e) => setPositionConfig(prev => ({ ...prev, color: e.target.value }))}
+                                    />
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <Label>Position Case</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={positionConfig.textTransform}
+                                      onChange={(e) => setPositionConfig(prev => ({ ...prev, textTransform: e.target.value as any }))}
+                                    >
+                                      <option value="none">Original</option>
+                                      <option value="uppercase">UPPERCASE</option>
+                                      <option value="lowercase">lowercase</option>
+                                      <option value="capitalize">Capitalize Each Word</option>
+                                    </select>
+                                  </div>
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label>Position Font Family</Label>
+                                  <select
+                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                    value={positionConfig.fontFamily}
+                                    onChange={(e) => setPositionConfig(prev => ({ ...prev, fontFamily: e.target.value }))}
+                                  >
+                                    {availableFonts.map(font => (
+                                      <option key={`pos-${font}`} value={font}>{font}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                            )}
 
                             <div className="md:col-span-2 space-y-2">
                              <div className="space-y-2">
@@ -1467,7 +2030,11 @@ export default function App() {
                         onClick={generateCertificates}
                         disabled={!template || names.length === 0 || isGenerating}
                     >
-                        {isGenerating ? "Generating..." : "Download Certificates (ZIP)"}
+                        {isGenerating
+                          ? generationPhase === 'batch-zipping'
+                            ? `${generationBatchLabel || 'Batch'} • Zipping... ${generationProgress}%`
+                            : `${generationBatchLabel || 'Batch'} • Generating... ${generationProgress}%`
+                          : "Download Certificates (ZIP)"}
                         {!isGenerating && <Download className="ml-2 w-4 h-4"/>}
                     </Button>
                 </CardFooter>
@@ -1482,6 +2049,11 @@ export default function App() {
                    <CardDescription>
                         Drag the text to position it. {verificationEnabled && 'Drag the QR to move it, drag its bottom-right corner to resize. '}
                         Showing: <span className="font-semibold text-primary">{previewName}</span>
+                        {certificateType === 'winner' && (
+                          <>
+                            {' '}| Position: <span className="font-semibold text-primary">{normalizePositionText(previewPositionInput, 1)}</span>
+                          </>
+                        )}
                    </CardDescription>
                </CardHeader>
                <CardContent className="flex-1 bg-slate-100/50 flex items-center justify-center p-4 overflow-hidden relative">
