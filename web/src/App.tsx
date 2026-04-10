@@ -748,6 +748,70 @@ export default function App() {
     if (normalized) setVerificationServerUrl(normalized)
   }
 
+  const requestMultipleDownloadPermission = async (totalBatches: number): Promise<'batch' | 'single'> => {
+    if (totalBatches <= 1) return 'single'
+
+    const getAutoDownloadPermissionStatus = async (): Promise<PermissionStatus | null> => {
+      if (!navigator.permissions?.query) return null
+      try {
+        return await navigator.permissions.query({ name: 'automatic-downloads' as PermissionName })
+      } catch {
+        return null
+      }
+    }
+
+    const getAutoDownloadPermissionState = async (): Promise<'granted' | 'denied' | 'prompt' | 'unsupported'> => {
+      const status = await getAutoDownloadPermissionStatus()
+      if (!status) return 'unsupported'
+      if (status.state === 'granted') return 'granted'
+      if (status.state === 'denied') return 'denied'
+      return 'prompt'
+    }
+
+    const triggerProbe = (index: number) => {
+      const probeBlob = new Blob([`certimaster-download-permission-probe-${index}`], { type: 'text/plain' })
+      const url = URL.createObjectURL(probeBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `certimaster_permission_probe_${index}.txt`
+      a.style.display = 'none'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+
+    const pollPermissionState = async (attempts: number, delayMs: number) => {
+      let last: 'granted' | 'denied' | 'prompt' | 'unsupported' = 'unsupported'
+      for (let i = 0; i < attempts; i++) {
+        last = await getAutoDownloadPermissionState()
+        if (last === 'granted') return 'granted' as const
+        if (last === 'denied') return 'denied' as const
+        await new Promise<void>(resolve => window.setTimeout(resolve, delayMs))
+      }
+      return last
+    }
+
+    const initialState = await pollPermissionState(2, 120)
+    if (initialState === 'granted') return 'batch'
+
+    const askBatch = window.confirm(
+      `This run will download ${totalBatches} ZIP files (one per batch).\n\n` +
+      `Press OK to request browser permission for multiple downloads now.\n\n` +
+      `Press Cancel to continue in single ZIP mode (safer downloads, but your system may be slower during generation).`
+    )
+    if (!askBatch) return 'single'
+
+    triggerProbe(1)
+    await new Promise<void>(resolve => window.setTimeout(resolve, 150))
+    triggerProbe(2)
+    await new Promise<void>(resolve => window.setTimeout(resolve, 350))
+
+    const afterPromptState = await pollPermissionState(10, 180)
+    if (afterPromptState === 'denied') return 'single'
+    return 'batch'
+  }
+
   const generateCertificates = async () => {
     if (!template || names.length === 0) return
 
@@ -817,23 +881,34 @@ export default function App() {
       }
     }
 
-    setVerificationStatus(null)
-    setIsGenerating(true)
-    setGenerationProgress(0)
-    setGenerationPhase('rendering')
-    setGenerationBatchLabel('')
-
     const supportsWorkerRendering = typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap !== 'undefined'
     if (!supportsWorkerRendering) {
       setVerificationStatus({
         type: 'error',
         message: 'This browser does not support worker-based certificate rendering (OffscreenCanvas). Use a Chromium-based browser.'
       })
-      setIsGenerating(false)
-      setGenerationPhase('idle')
-      setGenerationProgress(0)
       return
     }
+
+    const suggestedBatchSize = names.length >= 500 ? 30 : names.length >= 200 ? 40 : 60
+    let effectiveBatchSize = suggestedBatchSize
+    let preflightWarning: string | null = null
+
+    const totalBatches = Math.max(1, Math.ceil(names.length / Math.max(1, suggestedBatchSize)))
+
+    if (totalBatches > 1) {
+      const generationMode = await requestMultipleDownloadPermission(totalBatches)
+      if (generationMode === 'single') {
+        effectiveBatchSize = names.length
+        preflightWarning = 'Multiple-download permission was not granted. Continuing with a single ZIP download. This can be slower and heavier on your system because all processing happens locally.'
+      }
+    }
+
+    setVerificationStatus(preflightWarning ? { type: 'warning', message: preflightWarning } : null)
+    setIsGenerating(true)
+    setGenerationProgress(0)
+    setGenerationPhase('rendering')
+    setGenerationBatchLabel('')
 
     type WorkerProgress = {
       type: 'progress'
@@ -863,9 +938,8 @@ export default function App() {
     }
 
     const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
-
-    const batchSize = names.length >= 500 ? 30 : names.length >= 200 ? 40 : 60
     const zipBase = (zipName || 'certificates').trim() || 'certificates'
+
     const selectedFamilies = new Set<string>([config.fontFamily])
     if (certificateType === 'winner') selectedFamilies.add(positionConfig.fontFamily)
     const customFontsForWorker = Array.from(selectedFamilies)
@@ -920,7 +994,7 @@ export default function App() {
           eventName,
           eventDate,
           qrConfig,
-          batchSize,
+          batchSize: effectiveBatchSize,
           zipBaseName: zipBase,
           customFonts: customFontsForWorker
         }

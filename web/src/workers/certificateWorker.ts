@@ -298,7 +298,9 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
         type: 'batch-ready',
         batchIndex: batchIdx + 1,
         totalBatches,
-        zipFileName: `${zipBaseName}_part_${batchIdx + 1}_of_${totalBatches}.zip`,
+        zipFileName: totalBatches === 1
+          ? `${zipBaseName}.zip`
+          : `${zipBaseName}_part_${batchIdx + 1}_of_${totalBatches}.zip`,
         zipBuffer
       }, [zipBuffer])
     }
