@@ -383,6 +383,44 @@ export default function App() {
 
   // --- Handlers ---
 
+  const getAutoContrastTextColor = (img: HTMLImageElement) => {
+    try {
+      const sampleCanvas = document.createElement('canvas')
+      const maxDim = 96
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height))
+      const w = Math.max(1, Math.round(img.width * scale))
+      const h = Math.max(1, Math.round(img.height * scale))
+      sampleCanvas.width = w
+      sampleCanvas.height = h
+
+      const ctx = sampleCanvas.getContext('2d')
+      if (!ctx) return '#000000'
+
+      ctx.drawImage(img, 0, 0, w, h)
+      const { data } = ctx.getImageData(0, 0, w, h)
+
+      let luminanceSum = 0
+      let weightSum = 0
+
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i]
+        const g = data[i + 1]
+        const b = data[i + 2]
+        const a = data[i + 3] / 255
+        if (a <= 0) continue
+
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        luminanceSum += lum * a
+        weightSum += a
+      }
+
+      const avgLuminance = weightSum > 0 ? luminanceSum / weightSum : 255
+      return avgLuminance < 140 ? '#ffffff' : '#000000'
+    } catch {
+      return '#000000'
+    }
+  }
+
   const handleTemplateUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -391,10 +429,11 @@ export default function App() {
     reader.onload = (event) => {
       const img = new Image()
       img.onload = () => {
+        const autoColor = getAutoContrastTextColor(img)
         setTemplateDimensions({ width: img.width, height: img.height })
         setTemplate(event.target?.result as string)
         // Reset position to center approximately
-        setConfig(prev => ({ ...prev, x: img.width / 2, y: img.height / 2 }))
+        setConfig(prev => ({ ...prev, x: img.width / 2, y: img.height / 2, color: autoColor }))
       }
       img.src = event.target?.result as string
     }
