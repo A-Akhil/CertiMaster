@@ -4,6 +4,8 @@ import QRCode from 'qrcode'
 type TextTransform = 'none' | 'uppercase' | 'lowercase' | 'capitalize'
 type CertificateType = 'participation' | 'winner'
 type PositionFormat = 'ordinal' | 'roman' | 'words'
+type OutputFormat = 'png' | 'jpeg' | 'webp'
+type ZipCompression = 'STORE' | 'DEFLATE'
 
 type TextConfig = {
   x: number
@@ -36,10 +38,13 @@ type StartPayload = {
   templateDataUrl: string
   names: string[]
   positions: string[]
+  fileBaseNames: string[]
   certificateType: CertificateType
   positionFormat: PositionFormat
   config: TextConfig
   positionConfig: TextConfig
+  outputFormat: OutputFormat
+  outputQuality: number
   verificationEnabled: boolean
   verificationBaseUrl: string | null
   eventName: string
@@ -47,6 +52,8 @@ type StartPayload = {
   qrConfig: QrConfig
   batchSize: number
   zipBaseName: string
+  zipCompression: ZipCompression
+  zipCompressionLevel: number
   customFonts: CustomFontPayload[]
 }
 
@@ -202,10 +209,13 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
     templateDataUrl,
     names,
     positions,
+    fileBaseNames,
     certificateType,
     positionFormat,
     config,
     positionConfig,
+    outputFormat,
+    outputQuality,
     verificationEnabled,
     verificationBaseUrl,
     eventName,
@@ -213,6 +223,8 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
     qrConfig,
     batchSize,
     zipBaseName,
+    zipCompression,
+    zipCompressionLevel,
     customFonts
   } = event.data.payload
 
@@ -234,6 +246,9 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
     const total = names.length
     const totalBatches = Math.max(1, Math.ceil(total / Math.max(1, batchSize)))
     const records: VerificationRecord[] = []
+    const ext = outputFormat === 'jpeg' ? 'jpg' : outputFormat === 'webp' ? 'webp' : 'png'
+    const mime = outputFormat === 'jpeg' ? 'image/jpeg' : outputFormat === 'webp' ? 'image/webp' : 'image/png'
+    const quality = Math.max(0.5, Math.min(1, Number.isFinite(outputQuality) ? outputQuality : 0.92))
 
     for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
       const start = batchIdx * batchSize
@@ -278,11 +293,16 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
           ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
         }
 
-        const outputBlob = await canvas.convertToBlob({ type: 'image/png' })
-        const safeBase = sanitizeFileName(name)
+        const outputBlob = await canvas.convertToBlob(
+          outputFormat === 'png'
+            ? { type: mime }
+            : { type: mime, quality }
+        )
+        const preferredBase = fileBaseNames?.[i] || name
+        const safeBase = sanitizeFileName(preferredBase)
         const seen = nameCounts.get(safeBase) || 0
         nameCounts.set(safeBase, seen + 1)
-        const fileName = seen > 0 ? `${safeBase}_${seen + 1}.png` : `${safeBase}.png`
+        const fileName = seen > 0 ? `${safeBase}_${seen + 1}.${ext}` : `${safeBase}.${ext}`
         zip.file(fileName, outputBlob)
 
         if ((i - start) % 3 === 0 || i === end - 1) {
@@ -291,7 +311,14 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
       }
 
       postProgress(end, total, batchIdx + 1, totalBatches, 'batch-zipping')
-      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true })
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: zipCompression,
+        compressionOptions: zipCompression === 'DEFLATE'
+          ? { level: Math.max(1, Math.min(9, Math.floor(zipCompressionLevel))) }
+          : undefined,
+        streamFiles: true
+      })
       const zipBuffer = await zipBlob.arrayBuffer()
 
       ;(self as unknown as Worker).postMessage({

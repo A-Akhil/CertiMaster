@@ -25,8 +25,10 @@ import { Slider } from "@/components/ui/slider"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
 import * as XLSX from "xlsx"
 import Papa from "papaparse"
+import JSZip from "jszip"
 import { saveAs } from "file-saver"
 import QRCode from "qrcode"
+import { jsPDF } from "jspdf"
 
 // Add declaration for the experimental Local Font Access API
 declare global {
@@ -48,16 +50,24 @@ type GoogleFontItem = {
   url: string
 }
 
+type ExportImageFormat = 'png' | 'jpeg' | 'webp' | 'pdf'
+
 const FONT_DB_NAME = 'certimaster-fonts-db'
 const FONT_STORE_NAME = 'fonts'
 const MAX_GOOGLE_FONTS_IN_MEMORY = 20
 const PRELOAD_NEARBY_FORWARD = 10
 const PRELOAD_NEARBY_BACKWARD = 3
 const PRELOAD_CONCURRENCY = 2
+const EXPORT_SETTINGS_STORAGE_KEY = 'certimaster-export-settings'
+const FILE_SCOPED_SETTINGS_STORAGE_KEY = 'certimaster-file-scoped-settings'
+const MAX_PREVIEW_RENDER_DIM = 1000
+const MAX_PREVIEW_RENDER_PIXELS = 700_000
+const FILE_SCOPED_SAVE_DEBOUNCE_MS = 220
 
 export default function App() {
   const [template, setTemplate] = useState<string | null>(null)
   const [templateDimensions, setTemplateDimensions] = useState({ width: 0, height: 0 })
+  const [templateFileName, setTemplateFileName] = useState('')
   const [names, setNames] = useState<string[]>([])
   const [positions, setPositions] = useState<string[]>([])
   
@@ -77,6 +87,21 @@ export default function App() {
   const [certificateType, setCertificateType] = useState<'participation' | 'winner'>('participation')
   const [positionFormat, setPositionFormat] = useState<'ordinal' | 'roman' | 'words'>('ordinal')
   const [zipName, setZipName] = useState("certificates")
+  const [exportImageFormat, setExportImageFormat] = useState<ExportImageFormat>('png')
+  const [exportQuality, setExportQuality] = useState(0.92)
+  const [exportRangeMode, setExportRangeMode] = useState<'all' | 'range' | 'topN'>('all')
+  const [exportRangeStart, setExportRangeStart] = useState(1)
+  const [exportRangeEnd, setExportRangeEnd] = useState(50)
+  const [exportTopN, setExportTopN] = useState(100)
+  const [exportSortMode, setExportSortMode] = useState<'input' | 'nameAsc' | 'nameDesc' | 'positionAsc' | 'positionDesc'>('input')
+  const [exportPdfMode, setExportPdfMode] = useState<'single' | 'per-certificate'>('single')
+  const [exportBatchMode, setExportBatchMode] = useState<'auto' | 'single' | 'multi'>('auto')
+  const [exportBatchSize, setExportBatchSize] = useState(40)
+  const [exportZipCompression, setExportZipCompression] = useState<'store' | 'deflate'>('store')
+  const [exportZipLevel, setExportZipLevel] = useState(6)
+  const [exportPreset, setExportPreset] = useState<'quick' | 'balanced' | 'high-quality' | 'custom'>('balanced')
+  const [exportFilenamePattern, setExportFilenamePattern] = useState('{name}')
+  const [isExportOptionsOpen, setIsExportOptionsOpen] = useState(false)
   const [availableFonts, setAvailableFonts] = useState<string[]>([
     "Times New Roman", "Arial", "Courier New", "Georgia", "Verdana", "Trebuchet MS"
   ])
@@ -119,7 +144,6 @@ export default function App() {
   const [qrConfig, setQrConfig] = useState({ x: 20, y: 20, size: 188 })
   const [moveTarget, setMoveTarget] = useState<'name' | 'position' | 'qr'>('name')
   const qrAutoPositionedRef = useRef(false)
-  const nameAutoCenteredRef = useRef(false)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fontUploadRef = useRef<HTMLInputElement>(null)
@@ -133,12 +157,289 @@ export default function App() {
   const previewQrSizeRef = useRef(0)
   const previewDrawInProgressRef = useRef(false)
   const previewDrawQueuedRef = useRef(false)
+  const fileScopedSaveTimerRef = useRef<number | null>(null)
   const dragRafRef = useRef<number | null>(null)
   const latestMouseRef = useRef({ x: 0, y: 0 })
+  const templateLoadInProgressRef = useRef(false)
   type DragMode = 'none' | 'text' | 'position' | 'qr' | 'qr-resize'
   const [dragMode, setDragMode] = useState<DragMode>('none')
   const dragStart = useRef({ x: 0, y: 0 })
   const resizeStart = useRef({ size: 120, originX: 0, originY: 0 })
+
+  const getFileScopedSettingsKey = () => {
+    const templateKey = templateFileName.trim() || '__no_template__'
+    if (templateKey === '__no_template__') return ''
+    return templateKey
+  }
+
+  useEffect(() => {
+    if (exportPreset === 'custom') return
+
+    const isLossyImage = exportImageFormat === 'jpeg' || exportImageFormat === 'webp'
+    const isPdf = exportImageFormat === 'pdf'
+
+    if (exportPreset === 'quick') {
+      if (isLossyImage) setExportQuality(0.72)
+      if (isPdf) {
+        setExportQuality(0.72)
+        setExportPdfMode('single')
+      }
+      setExportZipCompression('deflate')
+      setExportZipLevel(9)
+      setExportBatchMode('multi')
+      setExportBatchSize(80)
+      return
+    }
+
+    if (exportPreset === 'balanced') {
+      if (isLossyImage) setExportQuality(0.82)
+      if (isPdf) {
+        setExportQuality(0.82)
+        setExportPdfMode('single')
+      }
+      setExportZipCompression('deflate')
+      setExportZipLevel(7)
+      setExportBatchMode('auto')
+      setExportBatchSize(50)
+      return
+    }
+
+    if (isLossyImage) setExportQuality(0.94)
+    if (isPdf) {
+      setExportQuality(0.96)
+      setExportPdfMode('single')
+    }
+    setExportZipCompression('deflate')
+    setExportZipLevel(6)
+    setExportBatchMode('single')
+    setExportBatchSize(30)
+  }, [exportPreset])
+
+  useEffect(() => {
+    if (exportPreset === 'custom') return
+
+    const isLossyImage = exportImageFormat === 'jpeg' || exportImageFormat === 'webp'
+    const isPdf = exportImageFormat === 'pdf'
+
+    if (exportPreset === 'quick') {
+      if (isLossyImage) setExportQuality(0.72)
+      if (isPdf) {
+        setExportQuality(0.72)
+        setExportPdfMode('single')
+      }
+      return
+    }
+
+    if (exportPreset === 'balanced') {
+      if (isLossyImage) setExportQuality(0.82)
+      if (isPdf) {
+        setExportQuality(0.82)
+        setExportPdfMode('single')
+      }
+      return
+    }
+
+    if (isLossyImage) setExportQuality(0.94)
+    if (isPdf) {
+      setExportQuality(0.96)
+      setExportPdfMode('single')
+    }
+  }, [exportImageFormat])
+
+  useEffect(() => {
+    try {
+      const savedRaw = localStorage.getItem(EXPORT_SETTINGS_STORAGE_KEY)
+      if (!savedRaw) return
+      const payload = JSON.parse(savedRaw) as any
+      setExportPreset(payload.exportPreset ?? 'custom')
+      setExportImageFormat(payload.exportImageFormat ?? 'png')
+      setExportQuality(Number.isFinite(payload.exportQuality) ? payload.exportQuality : 0.92)
+      setExportRangeMode(payload.exportRangeMode ?? 'all')
+      setExportRangeStart(Number.isFinite(payload.exportRangeStart) ? payload.exportRangeStart : 1)
+      setExportRangeEnd(Number.isFinite(payload.exportRangeEnd) ? payload.exportRangeEnd : 50)
+      setExportTopN(Number.isFinite(payload.exportTopN) ? payload.exportTopN : 100)
+      setExportSortMode(payload.exportSortMode ?? 'input')
+      setExportPdfMode(payload.exportPdfMode ?? 'single')
+      setExportBatchMode(payload.exportBatchMode ?? 'auto')
+      setExportBatchSize(Number.isFinite(payload.exportBatchSize) ? payload.exportBatchSize : 40)
+      setExportZipCompression(payload.exportZipCompression ?? 'store')
+      setExportZipLevel(Number.isFinite(payload.exportZipLevel) ? payload.exportZipLevel : 6)
+      setExportFilenamePattern(payload.exportFilenamePattern ?? '{name}')
+    } catch {
+      // Ignore broken saved export settings and continue with defaults.
+    }
+  }, [])
+
+  useEffect(() => {
+    const payload = {
+      exportImageFormat,
+      exportQuality,
+      exportRangeMode,
+      exportRangeStart,
+      exportRangeEnd,
+      exportTopN,
+      exportSortMode,
+      exportPdfMode,
+      exportBatchMode,
+      exportBatchSize,
+      exportZipCompression,
+      exportZipLevel,
+      exportFilenamePattern,
+      exportPreset
+    }
+    localStorage.setItem(EXPORT_SETTINGS_STORAGE_KEY, JSON.stringify(payload))
+  }, [
+    exportImageFormat,
+    exportQuality,
+    exportRangeMode,
+    exportRangeStart,
+    exportRangeEnd,
+    exportTopN,
+    exportSortMode,
+    exportPdfMode,
+    exportBatchMode,
+    exportBatchSize,
+    exportZipCompression,
+    exportZipLevel,
+    exportFilenamePattern,
+    exportPreset
+  ])
+
+  useEffect(() => {
+    const scopedKey = getFileScopedSettingsKey()
+    if (!scopedKey) return
+
+    try {
+      const raw = localStorage.getItem(FILE_SCOPED_SETTINGS_STORAGE_KEY)
+      if (!raw) return
+      const all = JSON.parse(raw) as Record<string, any>
+      const payload = all[scopedKey]
+      if (!payload) return
+
+      if (payload.config && typeof payload.config === 'object') {
+        setConfig(prev => {
+          const next = { ...prev, ...payload.config }
+          if (template === null || templateLoadInProgressRef.current) {
+            next.x = prev.x
+            next.y = prev.y
+          }
+          return next
+        })
+      }
+      if (payload.positionConfig && typeof payload.positionConfig === 'object') {
+        setPositionConfig(prev => ({ ...prev, ...payload.positionConfig }))
+      }
+      if (payload.qrConfig && typeof payload.qrConfig === 'object') {
+        setQrConfig(prev => ({ ...prev, ...payload.qrConfig }))
+      }
+
+      setCertificateType(payload.certificateType ?? 'participation')
+      setPositionFormat(payload.positionFormat ?? 'ordinal')
+      setZipName(payload.zipName ?? 'certificates')
+      setMoveTarget(payload.moveTarget ?? 'name')
+      setVerificationEnabled(Boolean(payload.verificationEnabled))
+      setEventName(payload.eventName ?? '')
+      setEventDate(payload.eventDate ?? new Date().toISOString().split('T')[0])
+
+      setExportPreset(payload.exportPreset ?? 'custom')
+      setExportImageFormat(payload.exportImageFormat ?? 'png')
+      setExportQuality(Number.isFinite(payload.exportQuality) ? payload.exportQuality : 0.92)
+      setExportRangeMode(payload.exportRangeMode ?? 'all')
+      setExportRangeStart(Number.isFinite(payload.exportRangeStart) ? payload.exportRangeStart : 1)
+      setExportRangeEnd(Number.isFinite(payload.exportRangeEnd) ? payload.exportRangeEnd : 50)
+      setExportTopN(Number.isFinite(payload.exportTopN) ? payload.exportTopN : 100)
+      setExportSortMode(payload.exportSortMode ?? 'input')
+      setExportPdfMode(payload.exportPdfMode ?? 'single')
+      setExportBatchMode(payload.exportBatchMode ?? 'auto')
+      setExportBatchSize(Number.isFinite(payload.exportBatchSize) ? payload.exportBatchSize : 40)
+      setExportZipCompression(payload.exportZipCompression ?? 'store')
+      setExportZipLevel(Number.isFinite(payload.exportZipLevel) ? payload.exportZipLevel : 6)
+      setExportFilenamePattern(payload.exportFilenamePattern ?? '{name}')
+    } catch {
+      // Ignore broken file-scoped settings and continue with current state.
+    }
+  }, [templateFileName, template])
+
+  useEffect(() => {
+    const scopedKey = getFileScopedSettingsKey()
+    if (!scopedKey) return
+    if (templateLoadInProgressRef.current) return
+
+    if (fileScopedSaveTimerRef.current !== null) {
+      window.clearTimeout(fileScopedSaveTimerRef.current)
+      fileScopedSaveTimerRef.current = null
+    }
+
+    fileScopedSaveTimerRef.current = window.setTimeout(() => {
+      try {
+        const raw = localStorage.getItem(FILE_SCOPED_SETTINGS_STORAGE_KEY)
+        const all = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+        all[scopedKey] = {
+          config,
+          positionConfig,
+          qrConfig,
+          certificateType,
+          positionFormat,
+          zipName,
+          moveTarget,
+          verificationEnabled,
+          eventName,
+          eventDate,
+          exportPreset,
+          exportImageFormat,
+          exportQuality,
+          exportRangeMode,
+          exportRangeStart,
+          exportRangeEnd,
+          exportTopN,
+          exportSortMode,
+          exportPdfMode,
+          exportBatchMode,
+          exportBatchSize,
+          exportZipCompression,
+          exportZipLevel,
+          exportFilenamePattern
+        }
+        localStorage.setItem(FILE_SCOPED_SETTINGS_STORAGE_KEY, JSON.stringify(all))
+      } catch {
+        // Ignore localStorage write failures.
+      }
+      fileScopedSaveTimerRef.current = null
+    }, FILE_SCOPED_SAVE_DEBOUNCE_MS)
+
+    return () => {
+      if (fileScopedSaveTimerRef.current !== null) {
+        window.clearTimeout(fileScopedSaveTimerRef.current)
+        fileScopedSaveTimerRef.current = null
+      }
+    }
+  }, [
+    templateFileName,
+    config,
+    positionConfig,
+    qrConfig,
+    certificateType,
+    positionFormat,
+    zipName,
+    moveTarget,
+    verificationEnabled,
+    eventName,
+    eventDate,
+    exportPreset,
+    exportImageFormat,
+    exportQuality,
+    exportRangeMode,
+    exportRangeStart,
+    exportRangeEnd,
+    exportTopN,
+    exportSortMode,
+    exportPdfMode,
+    exportBatchMode,
+    exportBatchSize,
+    exportZipCompression,
+    exportZipLevel,
+    exportFilenamePattern
+  ])
 
   // --- Font Loading ---
   const loadLocalFonts = async (showAlert = false) => {
@@ -452,6 +753,9 @@ export default function App() {
   const handleTemplateUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
+    const shouldAutoCenter = template === null
+    templateLoadInProgressRef.current = true
+    setTemplateFileName(file.name)
 
     const reader = new FileReader()
     reader.onload = (event) => {
@@ -462,15 +766,21 @@ export default function App() {
         setTemplate(event.target?.result as string)
         setConfig(prev => {
           const next = { ...prev, color: autoColor }
-          if (!nameAutoCenteredRef.current) {
+          if (shouldAutoCenter) {
             next.x = img.width / 2
             next.y = img.height / 2
-            nameAutoCenteredRef.current = true
           }
           return next
         })
+        templateLoadInProgressRef.current = false
+      }
+      img.onerror = () => {
+        templateLoadInProgressRef.current = false
       }
       img.src = event.target?.result as string
+    }
+    reader.onerror = () => {
+      templateLoadInProgressRef.current = false
     }
     reader.readAsDataURL(file)
   }
@@ -767,51 +1077,61 @@ export default function App() {
       do {
         previewDrawQueuedRef.current = false
 
-    const canvas = canvasRef.current
+        const canvas = canvasRef.current
         const img = templateImageRef.current
         if (!canvas || !template || !img) continue
-    const ctx = canvas.getContext("2d")
+        const ctx = canvas.getContext("2d")
         if (!ctx) continue
 
-        canvas.width = img.width
-        canvas.height = img.height
-        ctx.drawImage(img, 0, 0)
+        const dimScale = Math.min(1, MAX_PREVIEW_RENDER_DIM / Math.max(img.width, img.height))
+        const pixelScale = Math.min(1, Math.sqrt(MAX_PREVIEW_RENDER_PIXELS / Math.max(1, img.width * img.height)))
+        const previewScale = Math.min(dimScale, pixelScale)
+        const previewWidth = Math.max(1, Math.round(img.width * previewScale))
+        const previewHeight = Math.max(1, Math.round(img.height * previewScale))
 
-        ctx.font = `${config.fontSize}px "${config.fontFamily}"`
+        if (canvas.width !== previewWidth) canvas.width = previewWidth
+        if (canvas.height !== previewHeight) canvas.height = previewHeight
+        ctx.clearRect(0, 0, previewWidth, previewHeight)
+        ctx.drawImage(img, 0, 0, previewWidth, previewHeight)
+
+        ctx.font = `${Math.max(8, Math.round(config.fontSize * previewScale))}px "${config.fontFamily}"`
         ctx.fillStyle = config.color
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
         const transformedText = applyTextTransform(previewName, config.textTransform)
-        ctx.fillText(transformedText, config.x, config.y)
+        ctx.fillText(transformedText, config.x * previewScale, config.y * previewScale)
 
         if (certificateType === 'winner') {
-          ctx.font = `${positionConfig.fontSize}px "${positionConfig.fontFamily}"`
+          ctx.font = `${Math.max(8, Math.round(positionConfig.fontSize * previewScale))}px "${positionConfig.fontFamily}"`
           ctx.fillStyle = positionConfig.color
           ctx.textAlign = "center"
           ctx.textBaseline = "middle"
           const pos = normalizePositionText(previewPositionInput, 1)
           const transformedPos = applyTextTransform(pos, positionConfig.textTransform)
-          ctx.fillText(transformedPos, positionConfig.x, positionConfig.y)
+          ctx.fillText(transformedPos, positionConfig.x * previewScale, positionConfig.y * previewScale)
         }
 
         if (verificationEnabled) {
           try {
-            const qrCanvas = await ensurePreviewQrCanvas(qrConfig.size)
-            ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
+            const scaledQrSize = Math.max(24, Math.round(qrConfig.size * previewScale))
+            const qrCanvas = await ensurePreviewQrCanvas(scaledQrSize)
+            const qrX = qrConfig.x * previewScale
+            const qrY = qrConfig.y * previewScale
+            ctx.drawImage(qrCanvas, qrX, qrY, scaledQrSize, scaledQrSize)
 
             // Dashed blue selection border
             ctx.strokeStyle = '#3b82f6'
-            ctx.lineWidth = Math.max(2, img.width / 400)
-            ctx.setLineDash([Math.max(4, img.width / 200), Math.max(2, img.width / 400)])
-            ctx.strokeRect(qrConfig.x - 2, qrConfig.y - 2, qrConfig.size + 4, qrConfig.size + 4)
+            ctx.lineWidth = Math.max(1.5, previewWidth / 500)
+            ctx.setLineDash([Math.max(3, previewWidth / 240), Math.max(2, previewWidth / 400)])
+            ctx.strokeRect(qrX - 2, qrY - 2, scaledQrSize + 4, scaledQrSize + 4)
             ctx.setLineDash([])
 
             // Bottom-right resize handle (blue square)
-            const grip = Math.max(12, qrConfig.size * 0.18)
+            const grip = Math.max(9, scaledQrSize * 0.18)
             ctx.fillStyle = '#3b82f6'
             ctx.fillRect(
-              qrConfig.x + qrConfig.size - grip / 2,
-              qrConfig.y + qrConfig.size - grip / 2,
+              qrX + scaledQrSize - grip / 2,
+              qrY + scaledQrSize - grip / 2,
               grip, grip
             )
           } catch (err) {
@@ -857,9 +1177,11 @@ export default function App() {
     const canvas = canvasRef.current
     if (!canvas) return { x: 0, y: 0 }
     const rect = canvas.getBoundingClientRect()
+    const sourceWidth = templateDimensions.width || canvas.width
+    const sourceHeight = templateDimensions.height || canvas.height
     return {
-      x: (e.clientX - rect.left) * (canvas.width / rect.width),
-      y: (e.clientY - rect.top) * (canvas.height / rect.height)
+      x: (e.clientX - rect.left) * (sourceWidth / rect.width),
+      y: (e.clientY - rect.top) * (sourceHeight / rect.height)
     }
   }
 
@@ -882,15 +1204,20 @@ export default function App() {
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const { x: mouseX, y: mouseY } = getCanvasCoords(e)
-    if (moveTarget === 'qr' && verificationEnabled) {
-      const qrTarget = getQrTarget(mouseX, mouseY)
-      const target = qrTarget || 'qr'
-      setDragMode(target)
-      if (target === 'qr') {
+    const qrTarget = verificationEnabled ? getQrTarget(mouseX, mouseY) : null
+    if (qrTarget) {
+      setDragMode(qrTarget)
+      if (qrTarget === 'qr') {
         dragStart.current = { x: mouseX - qrConfig.x, y: mouseY - qrConfig.y }
       } else {
         resizeStart.current = { size: qrConfig.size, originX: mouseX, originY: mouseY }
       }
+      return
+    }
+
+    if (moveTarget === 'qr' && verificationEnabled) {
+      setDragMode('qr')
+      dragStart.current = { x: mouseX - qrConfig.x, y: mouseY - qrConfig.y }
       return
     }
 
@@ -912,9 +1239,11 @@ export default function App() {
 
     // Update cursor on hover (even without dragging)
     if (dragMode === 'none' && canvas) {
-      if (moveTarget === 'qr' && verificationEnabled) {
-        const q = getQrTarget(mouseX, mouseY)
+      const q = verificationEnabled ? getQrTarget(mouseX, mouseY) : null
+      if (q) {
         canvas.style.cursor = q === 'qr-resize' ? 'nwse-resize' : 'grab'
+      } else if (moveTarget === 'qr' && verificationEnabled) {
+        canvas.style.cursor = 'grab'
       } else {
         canvas.style.cursor = 'move'
       }
@@ -1113,6 +1442,85 @@ export default function App() {
       return
     }
 
+    type ExportRecord = { name: string; position: string; sourceIndex: number }
+
+    const records: ExportRecord[] = names.map((name, i) => ({
+      name,
+      position: positions[i] || '',
+      sourceIndex: i
+    }))
+
+    if (exportSortMode === 'nameAsc') {
+      records.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    } else if (exportSortMode === 'nameDesc') {
+      records.sort((a, b) => b.name.localeCompare(a.name, undefined, { sensitivity: 'base' }))
+    } else if (exportSortMode === 'positionAsc') {
+      records.sort((a, b) => {
+        const aRank = Number.parseFloat(a.position)
+        const bRank = Number.parseFloat(b.position)
+        const aScore = Number.isFinite(aRank) ? aRank : Number.MAX_SAFE_INTEGER
+        const bScore = Number.isFinite(bRank) ? bRank : Number.MAX_SAFE_INTEGER
+        return aScore - bScore
+      })
+    } else if (exportSortMode === 'positionDesc') {
+      records.sort((a, b) => {
+        const aRank = Number.parseFloat(a.position)
+        const bRank = Number.parseFloat(b.position)
+        const aScore = Number.isFinite(aRank) ? aRank : Number.MIN_SAFE_INTEGER
+        const bScore = Number.isFinite(bRank) ? bRank : Number.MIN_SAFE_INTEGER
+        return bScore - aScore
+      })
+    }
+
+    const buildSelectedIndices = (total: number) => {
+      if (exportRangeMode === 'all') return Array.from({ length: total }, (_, i) => i)
+
+      if (exportRangeMode === 'topN') {
+        const n = Math.max(1, Math.min(total, Math.floor(exportTopN || total)))
+        return Array.from({ length: n }, (_, i) => i)
+      }
+
+      const start = Math.max(1, Math.min(total, Math.floor(exportRangeStart || 1)))
+      const end = Math.max(1, Math.min(total, Math.floor(exportRangeEnd || total)))
+      const from = Math.min(start, end) - 1
+      const to = Math.max(start, end) - 1
+      return Array.from({ length: to - from + 1 }, (_, i) => from + i)
+    }
+
+    const selectedIndices = buildSelectedIndices(records.length)
+    if (selectedIndices.length === 0) {
+      setVerificationStatus({ type: 'warning', message: 'No records selected for export. Check your export range settings.' })
+      return
+    }
+
+    const buildFilenameBase = (name: string, position: string, sourceIndex: number, seqIndex: number) => {
+      const templatePattern = exportFilenamePattern.trim() || '{name}'
+      const posRaw = position || ''
+      const posText = certificateType === 'winner' ? normalizePositionText(posRaw, sourceIndex + 1) : ''
+      const safeEventName = (eventName || '').trim()
+      const safeEventDate = (eventDate || '').trim()
+      const built = templatePattern
+        .replaceAll('{name}', name)
+        .replaceAll('{index}', String(sourceIndex + 1))
+        .replaceAll('{seq}', String(seqIndex + 1))
+        .replaceAll('{position}', posText)
+        .replaceAll('{event}', safeEventName)
+        .replaceAll('{date}', safeEventDate)
+        .replaceAll('{type}', certificateType)
+      const cleaned = built.trim()
+      return cleaned || name || `certificate_${seqIndex + 1}`
+    }
+
+    const sanitizeFileName = (value: string) => {
+      const cleaned = value.replace(/[\\/:*?"<>|]/g, '_').trim()
+      return cleaned || 'certificate'
+    }
+
+    const selectedRecords = selectedIndices.map((i) => records[i])
+    const exportNames = selectedRecords.map((r) => r.name)
+    const exportPositions = selectedRecords.map((r) => r.position)
+    const exportFileBaseNames = selectedRecords.map((r, seqIndex) => buildFilenameBase(r.name, r.position, r.sourceIndex, seqIndex))
+
     let baseUrl: string | null = null
 
     // Validate verification config before starting
@@ -1175,7 +1583,7 @@ export default function App() {
     }
 
     const supportsWorkerRendering = typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap !== 'undefined'
-    if (!supportsWorkerRendering) {
+    if (exportImageFormat !== 'pdf' && !supportsWorkerRendering) {
       setVerificationStatus({
         type: 'error',
         message: 'This browser does not support worker-based certificate rendering (OffscreenCanvas). Use a Chromium-based browser.'
@@ -1183,16 +1591,22 @@ export default function App() {
       return
     }
 
-    const suggestedBatchSize = names.length >= 500 ? 30 : names.length >= 200 ? 40 : 60
+    const suggestedBatchSize = exportNames.length >= 500 ? 30 : exportNames.length >= 200 ? 40 : 60
     let effectiveBatchSize = suggestedBatchSize
     let preflightWarning: string | null = null
 
-    const totalBatches = Math.max(1, Math.ceil(names.length / Math.max(1, suggestedBatchSize)))
+    if (exportBatchMode === 'single') {
+      effectiveBatchSize = exportNames.length
+    } else if (exportBatchMode === 'multi') {
+      effectiveBatchSize = Math.max(1, Math.min(exportNames.length, Math.floor(exportBatchSize || 1)))
+    }
 
-    if (totalBatches > 1) {
+    const totalBatches = Math.max(1, Math.ceil(exportNames.length / Math.max(1, effectiveBatchSize)))
+
+    if (totalBatches > 1 && (exportBatchMode === 'auto' || exportBatchMode === 'multi')) {
       const generationMode = await requestMultipleDownloadPermission(totalBatches)
       if (generationMode === 'single') {
-        effectiveBatchSize = names.length
+        effectiveBatchSize = exportNames.length
         preflightWarning = 'Multiple-download permission was not granted. Continuing with a single ZIP download. This can be slower and heavier on your system because all processing happens locally.'
       }
     }
@@ -1231,73 +1645,204 @@ export default function App() {
       message: string
     }
 
-    const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
     const zipBase = (zipName || 'certificates').trim() || 'certificates'
 
-    const selectedFamilies = new Set<string>([config.fontFamily])
-    if (certificateType === 'winner') selectedFamilies.add(positionConfig.fontFamily)
-    const customFontsForWorker = Array.from(selectedFamilies)
-      .map((family) => {
-        const data = customFontDataRef.current.get(family)
-        if (!data) return null
-        return { family, data: data.slice(0) }
+    let batchRecords: { id: string; name: string; event: string; date: string }[] = []
+
+    try {
+      if (exportImageFormat === 'pdf') {
+        const img = new Image()
+        img.src = template
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve()
+          img.onerror = () => reject(new Error('Failed to load certificate template for PDF export.'))
+        })
+
+        const canvas = document.createElement('canvas')
+        canvas.width = img.width
+        canvas.height = img.height
+        const ctx = canvas.getContext('2d')
+        if (!ctx) throw new Error('Canvas context unavailable for PDF export.')
+
+        const pdfUsesPngRaster = exportPreset === 'high-quality'
+        const pdfRasterMime = pdfUsesPngRaster ? 'image/png' : 'image/jpeg'
+        const pdfRasterType = pdfUsesPngRaster ? 'PNG' : 'JPEG'
+        const pdfRasterQuality = pdfUsesPngRaster
+          ? 1
+          : Math.max(0.55, Math.min(0.95, Number.isFinite(exportQuality) ? exportQuality : 0.82))
+
+        const orientation = img.width >= img.height ? 'landscape' : 'portrait'
+        const pdfNameCounts = new Map<string, number>()
+
+        const makePageDataUrl = async (idx: number): Promise<string> => {
+          const name = exportNames[idx]
+          const posRaw = exportPositions[idx]
+          ctx.clearRect(0, 0, canvas.width, canvas.height)
+          ctx.drawImage(img, 0, 0)
+
+          ctx.font = `${config.fontSize}px "${config.fontFamily}"`
+          ctx.fillStyle = config.color
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          const transformedName = applyTextTransform(name, config.textTransform)
+          ctx.fillText(transformedName, config.x, config.y)
+
+          if (certificateType === 'winner') {
+            ctx.font = `${positionConfig.fontSize}px "${positionConfig.fontFamily}"`
+            ctx.fillStyle = positionConfig.color
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            const posText = normalizePositionText(posRaw, idx + 1)
+            const transformedPos = applyTextTransform(posText, positionConfig.textTransform)
+            ctx.fillText(transformedPos, positionConfig.x, positionConfig.y)
+          }
+
+          if (verificationEnabled && baseUrl) {
+            const id = crypto.randomUUID()
+            batchRecords.push({ id, name, event: eventName, date: eventDate })
+            const qrUrl = `${baseUrl}/verify/${id}`
+            const qrCanvas = document.createElement('canvas')
+            await QRCode.toCanvas(qrCanvas, qrUrl, {
+              width: qrConfig.size,
+              margin: 1
+            })
+            ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
+          }
+
+          return canvas.toDataURL(pdfRasterMime, pdfRasterQuality)
+        }
+
+        if (exportPdfMode === 'single') {
+          const pdf = new jsPDF({
+            orientation,
+            unit: 'px',
+            format: [img.width, img.height],
+            hotfixes: ['px_scaling']
+          })
+
+          for (let i = 0; i < exportNames.length; i++) {
+            const pageData = await makePageDataUrl(i)
+            if (i > 0) pdf.addPage([img.width, img.height], orientation)
+            pdf.addImage(pageData, pdfRasterType, 0, 0, img.width, img.height)
+            setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
+          }
+
+          saveAs(pdf.output('blob'), `${zipBase}.pdf`)
+        } else {
+          const zip = new JSZip()
+          for (let i = 0; i < exportNames.length; i++) {
+            const pageData = await makePageDataUrl(i)
+            const pdf = new jsPDF({
+              orientation,
+              unit: 'px',
+              format: [img.width, img.height],
+              hotfixes: ['px_scaling']
+            })
+            pdf.addImage(pageData, pdfRasterType, 0, 0, img.width, img.height)
+            const preferredBase = exportFileBaseNames[i] || exportNames[i]
+            const safeBase = sanitizeFileName(preferredBase)
+            const seen = pdfNameCounts.get(safeBase) || 0
+            pdfNameCounts.set(safeBase, seen + 1)
+            const fileName = seen > 0 ? `${safeBase}_${seen + 1}.pdf` : `${safeBase}.pdf`
+            zip.file(fileName, pdf.output('arraybuffer'))
+            setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
+          }
+
+          setGenerationPhase('batch-zipping')
+          const zipBlob = await zip.generateAsync({
+            type: 'blob',
+            compression: exportZipCompression === 'deflate' ? 'DEFLATE' : 'STORE',
+            compressionOptions: exportZipCompression === 'deflate'
+              ? { level: Math.max(1, Math.min(9, Math.floor(exportZipLevel))) }
+              : undefined,
+            streamFiles: true
+          })
+          saveAs(zipBlob, `${zipBase}.zip`)
+        }
+      } else {
+        const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
+
+        const selectedFamilies = new Set<string>([config.fontFamily])
+        if (certificateType === 'winner') selectedFamilies.add(positionConfig.fontFamily)
+        const customFontsForWorker = Array.from(selectedFamilies)
+          .map((family) => {
+            const data = customFontDataRef.current.get(family)
+            if (!data) return null
+            return { family, data: data.slice(0) }
+          })
+          .filter((f): f is { family: string; data: ArrayBuffer } => Boolean(f))
+        const customFontTransfers = customFontsForWorker.map((f) => f.data)
+
+        const workerResult = await new Promise<{ records: { id: string; name: string; event: string; date: string }[] }>((resolve, reject) => {
+          worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerBatchReady | WorkerDone | WorkerError>) => {
+            const message = event.data
+            if (message.type === 'progress') {
+              setGenerationPhase(message.phase)
+              setGenerationProgress(Math.round((message.processed / Math.max(1, message.total)) * 100))
+              setGenerationBatchLabel(`Batch ${message.batchIndex}/${message.totalBatches}`)
+              return
+            }
+
+            if (message.type === 'batch-ready') {
+              const blob = new Blob([message.zipBuffer], { type: 'application/zip' })
+              saveAs(blob, message.zipFileName)
+              return
+            }
+
+            if (message.type === 'done') {
+              resolve({ records: message.verificationRecords })
+              return
+            }
+
+            reject(new Error(message.message || 'Worker generation failed'))
+          }
+
+          worker.onerror = (err) => {
+            reject(new Error(err.message || 'Worker crashed during generation'))
+          }
+
+          worker.postMessage({
+            type: 'start',
+            payload: {
+              templateDataUrl: template,
+              names: exportNames,
+              positions: exportPositions,
+              fileBaseNames: exportFileBaseNames,
+              certificateType,
+              positionFormat,
+              config,
+              positionConfig,
+              outputFormat: exportImageFormat,
+              outputQuality: Math.max(0.5, Math.min(1, Math.round(exportQuality * 100) / 100)),
+              verificationEnabled,
+              verificationBaseUrl: baseUrl,
+              eventName,
+              eventDate,
+              qrConfig,
+              batchSize: effectiveBatchSize,
+              zipBaseName: zipBase,
+              zipCompression: exportZipCompression === 'deflate' ? 'DEFLATE' : 'STORE',
+              zipCompressionLevel: Math.max(1, Math.min(9, Math.floor(exportZipLevel))),
+              customFonts: customFontsForWorker
+            }
+          }, customFontTransfers)
+        }).finally(() => {
+          worker.terminate()
+        })
+
+        batchRecords = workerResult.records
+      }
+    } catch (err) {
+      setVerificationStatus({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Certificate generation failed.'
       })
-      .filter((f): f is { family: string; data: ArrayBuffer } => Boolean(f))
-    const customFontTransfers = customFontsForWorker.map((f) => f.data)
-
-    const workerResult = await new Promise<{ records: { id: string; name: string; event: string; date: string }[] }>((resolve, reject) => {
-      worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerBatchReady | WorkerDone | WorkerError>) => {
-        const message = event.data
-        if (message.type === 'progress') {
-          setGenerationPhase(message.phase)
-          setGenerationProgress(Math.round((message.processed / Math.max(1, message.total)) * 100))
-          setGenerationBatchLabel(`Batch ${message.batchIndex}/${message.totalBatches}`)
-          return
-        }
-
-        if (message.type === 'batch-ready') {
-          const blob = new Blob([message.zipBuffer], { type: 'application/zip' })
-          saveAs(blob, message.zipFileName)
-          return
-        }
-
-        if (message.type === 'done') {
-          resolve({ records: message.verificationRecords })
-          return
-        }
-
-        reject(new Error(message.message || 'Worker generation failed'))
-      }
-
-      worker.onerror = (err) => {
-        reject(new Error(err.message || 'Worker crashed during generation'))
-      }
-
-      worker.postMessage({
-        type: 'start',
-        payload: {
-          templateDataUrl: template,
-          names,
-          positions,
-          certificateType,
-          positionFormat,
-          config,
-          positionConfig,
-          verificationEnabled,
-          verificationBaseUrl: baseUrl,
-          eventName,
-          eventDate,
-          qrConfig,
-          batchSize: effectiveBatchSize,
-          zipBaseName: zipBase,
-          customFonts: customFontsForWorker
-        }
-      }, customFontTransfers)
-    }).finally(() => {
-      worker.terminate()
-    })
-
-    const batchRecords = workerResult.records
+      setIsGenerating(false)
+      setGenerationPhase('idle')
+      setGenerationProgress(0)
+      setGenerationBatchLabel('')
+      return
+    }
 
     // Batch-save all verification records to the backend
     if (verificationEnabled && batchRecords.length > 0) {
@@ -1885,12 +2430,249 @@ export default function App() {
                              </div>
                              
                              <div className="md:col-span-2 space-y-2 pt-4 border-t">
-                                 <Label>Output Filename (sufixed with .zip)</Label>
+                                 <Label>Output ZIP Name (suffixed with .zip)</Label>
                                  <Input 
                                     value={zipName}
                                     onChange={(e) => setZipName(e.target.value)}
                                     placeholder="certificates"
                                  />
+                             </div>
+
+                             <div className="md:col-span-2 border rounded-md p-3 bg-slate-50 space-y-3">
+                                <button
+                                  type="button"
+                                  onClick={() => setIsExportOptionsOpen((prev) => !prev)}
+                                  className="w-full flex items-center justify-between text-left"
+                                  aria-expanded={isExportOptionsOpen}
+                                  aria-controls="export-options-content"
+                                >
+                                  <Label className="text-sm font-semibold cursor-pointer">Export Options</Label>
+                                  <span className="text-sm font-semibold text-slate-700">{isExportOptionsOpen ? '▾' : '>'}</span>
+                                </button>
+
+                                {isExportOptionsOpen && (
+                                <div id="export-options-content" className="space-y-3">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs text-slate-500">Preset</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={exportPreset}
+                                      onChange={(e) => setExportPreset(e.target.value as 'quick' | 'balanced' | 'high-quality' | 'custom')}
+                                    >
+                                      <option value="quick">Quick (smaller files)</option>
+                                      <option value="balanced">Balanced</option>
+                                      <option value="high-quality">High quality</option>
+                                      <option value="custom">Custom</option>
+                                    </select>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <Label className="text-xs text-slate-500">Sort Order</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={exportSortMode}
+                                      onChange={(e) => setExportSortMode(e.target.value as 'input' | 'nameAsc' | 'nameDesc' | 'positionAsc' | 'positionDesc')}
+                                    >
+                                      <option value="input">Input order</option>
+                                      <option value="nameAsc">Name A → Z</option>
+                                      <option value="nameDesc">Name Z → A</option>
+                                      <option value="positionAsc">Position low → high</option>
+                                      <option value="positionDesc">Position high → low</option>
+                                    </select>
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs text-slate-500">Image Format</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={exportImageFormat}
+                                      onChange={(e) => setExportImageFormat(e.target.value as ExportImageFormat)}
+                                    >
+                                      <option value="png">PNG (lossless)</option>
+                                      <option value="jpeg">JPEG (smaller)</option>
+                                      <option value="webp">WEBP (efficient)</option>
+                                      <option value="pdf">PDF</option>
+                                    </select>
+                                  </div>
+
+                                  {(exportImageFormat === 'jpeg' || exportImageFormat === 'webp') && (
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-500">Image Quality ({exportQuality.toFixed(2)})</Label>
+                                      <Slider
+                                        value={[exportQuality]}
+                                        min={0.5}
+                                        max={1}
+                                        step={0.01}
+                                        onValueChange={([val]) => setExportQuality(Math.round(val * 100) / 100)}
+                                      />
+                                    </div>
+                                  )}
+
+                                  {exportImageFormat === 'pdf' && (
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-500">PDF Mode</Label>
+                                      <select
+                                        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                        value={exportPdfMode}
+                                        onChange={(e) => setExportPdfMode(e.target.value as 'single' | 'per-certificate')}
+                                      >
+                                        <option value="single">Single PDF (multi-page)</option>
+                                        <option value="per-certificate">One PDF per certificate (ZIP)</option>
+                                      </select>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs text-slate-500">Export Range</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={exportRangeMode}
+                                      onChange={(e) => setExportRangeMode(e.target.value as 'all' | 'range' | 'topN')}
+                                    >
+                                      <option value="all">All records</option>
+                                      <option value="range">Index range</option>
+                                      <option value="topN">Top N</option>
+                                    </select>
+                                  </div>
+
+                                  {exportRangeMode === 'topN' && (
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-500">Top N</Label>
+                                      <Input
+                                        type="number"
+                                        min={1}
+                                        max={Math.max(1, names.length)}
+                                        value={exportTopN}
+                                        onChange={(e) => {
+                                          const n = Number.parseInt(e.target.value, 10)
+                                          if (Number.isNaN(n)) return
+                                          setExportTopN(Math.max(1, Math.min(Math.max(1, names.length), n)))
+                                        }}
+                                        className="h-9"
+                                      />
+                                    </div>
+                                  )}
+
+                                  {exportRangeMode === 'range' && (
+                                    <>
+                                      <div className="space-y-1">
+                                        <Label className="text-xs text-slate-500">Start (1-based)</Label>
+                                        <Input
+                                          type="number"
+                                          min={1}
+                                          max={Math.max(1, names.length)}
+                                          value={exportRangeStart}
+                                          onChange={(e) => {
+                                            const n = Number.parseInt(e.target.value, 10)
+                                            if (Number.isNaN(n)) return
+                                            setExportRangeStart(Math.max(1, Math.min(Math.max(1, names.length), n)))
+                                          }}
+                                          className="h-9"
+                                        />
+                                      </div>
+                                      <div className="space-y-1">
+                                        <Label className="text-xs text-slate-500">End (1-based)</Label>
+                                        <Input
+                                          type="number"
+                                          min={1}
+                                          max={Math.max(1, names.length)}
+                                          value={exportRangeEnd}
+                                          onChange={(e) => {
+                                            const n = Number.parseInt(e.target.value, 10)
+                                            if (Number.isNaN(n)) return
+                                            setExportRangeEnd(Math.max(1, Math.min(Math.max(1, names.length), n)))
+                                          }}
+                                          className="h-9"
+                                        />
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+
+                                <div className="space-y-1">
+                                  <Label className="text-xs text-slate-500">Filename Pattern</Label>
+                                  <Input
+                                    value={exportFilenamePattern}
+                                    onChange={(e) => setExportFilenamePattern(e.target.value)}
+                                    placeholder="{name}"
+                                  />
+                                  <div className="text-[11px] text-slate-600 space-y-1">
+                                    <p>Supported placeholders:</p>
+                                    <p><span className="font-mono">{'{name}'}</span> = certificate name from your input file.</p>
+                                    <p><span className="font-mono">{'{index}'}</span> = original row number from input (1-based).</p>
+                                    <p><span className="font-mono">{'{seq}'}</span> = export order number after sort/range (1, 2, 3...).</p>
+                                    <p><span className="font-mono">{'{event}'}</span> = event name (from QR verification settings).</p>
+                                    <p><span className="font-mono">{'{date}'}</span> = event date (YYYY-MM-DD).</p>
+                                    <p><span className="font-mono">{'{type}'}</span> = certificate type ({'participation'} / {'winner'}).</p>
+                                    {certificateType === 'winner' && (
+                                      <p><span className="font-mono">{'{position}'}</span> = winner position value for that row.</p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs text-slate-500">Batch Mode</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={exportBatchMode}
+                                      onChange={(e) => setExportBatchMode(e.target.value as 'auto' | 'single' | 'multi')}
+                                    >
+                                      <option value="auto">Auto</option>
+                                      <option value="single">Single ZIP</option>
+                                      <option value="multi">Multiple ZIPs</option>
+                                    </select>
+                                  </div>
+                                  {exportBatchMode === 'multi' && exportImageFormat !== 'pdf' && (
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-500">Batch Size</Label>
+                                      <Input
+                                        type="number"
+                                        min={1}
+                                        max={Math.max(1, names.length)}
+                                        value={exportBatchSize}
+                                        onChange={(e) => {
+                                          const n = Number.parseInt(e.target.value, 10)
+                                          if (Number.isNaN(n)) return
+                                          setExportBatchSize(Math.max(1, Math.min(Math.max(1, names.length), n)))
+                                        }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs text-slate-500">ZIP Compression</Label>
+                                    <select
+                                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                      value={exportZipCompression}
+                                      onChange={(e) => setExportZipCompression(e.target.value as 'store' | 'deflate')}
+                                    >
+                                      <option value="store">Store (fast, larger)</option>
+                                      <option value="deflate">Deflate (smaller)</option>
+                                    </select>
+                                  </div>
+
+                                  {exportPreset === 'custom' && exportZipCompression === 'deflate' && (
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-500">Compression Level ({exportZipLevel})</Label>
+                                      <Slider
+                                        value={[exportZipLevel]}
+                                        min={1}
+                                        max={9}
+                                        step={1}
+                                        onValueChange={([val]) => setExportZipLevel(Math.max(1, Math.min(9, Math.floor(val))))}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                                </div>
+                                )}
                              </div>
                         </div>
                     </div>
