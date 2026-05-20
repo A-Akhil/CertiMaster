@@ -1,0 +1,20 @@
+name = "certimaster-verification"
+main = "src/index.js"
+compatibility_date = "2024-03-11"
+workers_dev = true
+base_dir = "."
+
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
+
+[vars]
+VERIFY_ORG_NAME = "Your Org Name"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "certimaster-db"
+# Run: npx wrangler d1 create certimaster-db
+# then paste the returned database_id below
+# database_id = "<your-database-id>"

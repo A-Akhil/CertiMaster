@@ -48,4 +48,5 @@ __pycache__/
 !.dev.vars.example
 .env*
 !.env.example
+verification-backend/wrangler.toml
 verification-backend/passwords.txt
