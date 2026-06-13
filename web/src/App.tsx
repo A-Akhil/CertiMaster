@@ -1741,11 +1741,64 @@ export default function App() {
           })
 
           for (let i = 0; i < exportNames.length; i++) {
-            const pageData = await makePageDataUrl(i)
+            const name = exportNames[i]
+            const posRaw = exportPositions[i]
+            ctx.clearRect(0, 0, canvas.width, canvas.height)
+            ctx.drawImage(img, 0, 0)
+
+            ctx.font = `${config.fontSize}px "${config.fontFamily}"`
+            ctx.fillStyle = config.color
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            const transformedName = applyTextTransform(name, config.textTransform)
+            ctx.fillText(transformedName, config.x, config.y)
+
+            if (certificateType === 'winner') {
+              ctx.font = `${positionConfig.fontSize}px "${positionConfig.fontFamily}"`
+              ctx.fillStyle = positionConfig.color
+              ctx.textAlign = 'center'
+              ctx.textBaseline = 'middle'
+              const posText = normalizePositionText(posRaw, i + 1)
+              const transformedPos = applyTextTransform(posText, positionConfig.textTransform)
+              ctx.fillText(transformedPos, positionConfig.x, positionConfig.y)
+            }
+
+            if (verificationEnabled && baseUrl) {
+              const id = crypto.randomUUID()
+              batchRecords.push({ id, name, event: eventName, date: eventDate })
+              const qrUrl = `${baseUrl}/verify/${id}`
+              const qrCanvas = document.createElement('canvas')
+              await QRCode.toCanvas(qrCanvas, qrUrl, {
+                width: qrConfig.size,
+                margin: 1
+              })
+              ctx.drawImage(qrCanvas, qrConfig.x, qrConfig.y, qrConfig.size, qrConfig.size)
+            }
+
+            const imageBlob: Blob = await new Promise((resolve, reject) => {
+              canvas.toBlob(
+                (blob) => blob ? resolve(blob) : reject(new Error('toBlob failed')),
+                pdfRasterMime,
+                pdfRasterQuality
+              )
+            })
+            const imageBuffer = await imageBlob.arrayBuffer()
+            const imageU8 = new Uint8Array(imageBuffer)
+
             if (i > 0) pdf.addPage([img.width, img.height], orientation)
-            pdf.addImage(pageData, pdfRasterType, 0, 0, img.width, img.height)
+            pdf.addImage(imageU8, pdfRasterType, 0, 0, img.width, img.height)
+
             setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
+
+            // Yield main thread every 5 pages so browser stays responsive
+            if (i % 5 === 4) {
+              await new Promise(r => setTimeout(r, 0))
+            }
           }
+
+          setGenerationPhase('batch-zipping')
+          setGenerationBatchLabel('Saving PDF...')
+          await new Promise(r => setTimeout(r, 30))
 
           if (dirHandle) {
             const fileHandle = await dirHandle.getFileHandle(`${zipBase}.pdf`, { create: true })
@@ -1772,7 +1825,6 @@ export default function App() {
             const seen = pdfNameCounts.get(safeBase) || 0
             pdfNameCounts.set(safeBase, seen + 1)
             const fileName = seen > 0 ? `${safeBase}_${seen + 1}.pdf` : `${safeBase}.pdf`
-            zipData[fileName] = new Uint8Array(pdf.output('arraybuffer'))
             setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
             
             if (dirHandle) {
