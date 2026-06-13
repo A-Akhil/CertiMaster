@@ -1617,7 +1617,33 @@ export default function App() {
       effectiveBatchSize = Math.max(1, Math.min(exportNames.length, Math.floor(exportBatchSize || 1)))
     }
 
-    const needsMultipleZips = !('showDirectoryPicker' in window) || exportImageFormat === 'pdf'
+    let dirHandle: FileSystemDirectoryHandle | null = null
+    let manifest: Record<string, string> = {}
+
+    try {
+      if ('showDirectoryPicker' in window) {
+        dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+         setIsGenerating(false)
+         setGenerationPhase('idle')
+         return
+      }
+    }
+
+    if (dirHandle) {
+       try {
+         const manifestHandle = await dirHandle.getFileHandle('.certimaster_manifest.json')
+         const file = await manifestHandle.getFile()
+         const text = await file.text()
+         manifest = JSON.parse(text)
+       } catch {
+         manifest = {}
+       }
+    }
+
+    const needsMultipleZips = !dirHandle
     let actualBatchSize = needsMultipleZips ? effectiveBatchSize : exportNames.length
 
     if (needsMultipleZips && actualBatchSize < exportNames.length) {
@@ -1721,7 +1747,14 @@ export default function App() {
             setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
           }
 
-          saveAs(pdf.output('blob'), `${zipBase}.pdf`)
+          if (dirHandle) {
+            const fileHandle = await dirHandle.getFileHandle(`${zipBase}.pdf`, { create: true })
+            const writable = await fileHandle.createWritable()
+            await writable.write(pdf.output('blob'))
+            await writable.close()
+          } else {
+            saveAs(pdf.output('blob'), `${zipBase}.pdf`)
+          }
         } else {
           const zipData: Record<string, Uint8Array> = {}
           let batchIndex = 1
@@ -1742,50 +1775,32 @@ export default function App() {
             zipData[fileName] = new Uint8Array(pdf.output('arraybuffer'))
             setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
             
-            if (Object.keys(zipData).length >= actualBatchSize || i === exportNames.length - 1) {
-              setGenerationPhase('batch-zipping')
-              const zippedData = fflate.zipSync(zipData, { level: (exportZipCompression === 'deflate' ? Math.max(1, Math.min(9, Math.floor(exportZipLevel))) : 0) as any })
-              const zipBlob = new Blob([zippedData], { type: 'application/zip' })
-              const finalName = actualBatchSize >= exportNames.length ? `${zipBase}.zip` : `${zipBase}_part${batchIndex}.zip`
-              saveAs(zipBlob, finalName)
-              
-              for (const key of Object.keys(zipData)) delete zipData[key]
-              batchIndex++
-              if (i < exportNames.length - 1) {
-                 setGenerationPhase('rendering')
-                 await new Promise(r => setTimeout(r, 200))
+            if (dirHandle) {
+              const fileHandle = await dirHandle.getFileHandle(fileName, { create: true })
+              const writable = await fileHandle.createWritable()
+              await writable.write(pdf.output('arraybuffer'))
+              await writable.close()
+            } else {
+              zipData[fileName] = new Uint8Array(pdf.output('arraybuffer'))
+              if (Object.keys(zipData).length >= actualBatchSize || i === exportNames.length - 1) {
+                setGenerationPhase('batch-zipping')
+                const zippedData = fflate.zipSync(zipData, { level: (exportZipCompression === 'deflate' ? Math.max(1, Math.min(9, Math.floor(exportZipLevel))) : 0) as any })
+                const zipBlob = new Blob([zippedData], { type: 'application/zip' })
+                const finalName = actualBatchSize >= exportNames.length ? `${zipBase}.zip` : `${zipBase}_part${batchIndex}.zip`
+                saveAs(zipBlob, finalName)
+                
+                for (const key of Object.keys(zipData)) delete zipData[key]
+                batchIndex++
+                if (i < exportNames.length - 1) {
+                   setGenerationPhase('rendering')
+                   await new Promise(r => setTimeout(r, 200))
+                }
               }
             }
           }
         }
       } else {
-        let dirHandle: FileSystemDirectoryHandle | null = null
-        let manifest: Record<string, string> = {}
         const zipFallback: Record<string, Uint8Array> = {}
-
-        try {
-          if ('showDirectoryPicker' in window) {
-            dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
-          }
-        } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-             setIsGenerating(false)
-             setGenerationPhase('idle')
-             return
-          }
-        }
-
-        if (dirHandle) {
-           try {
-             const manifestHandle = await dirHandle.getFileHandle('.certimaster_manifest.json')
-             const file = await manifestHandle.getFile()
-             const text = await file.text()
-             manifest = JSON.parse(text)
-           } catch {
-             manifest = {}
-           }
-        }
-
         const allTasks: any[] = []
         const ext = exportImageFormat === 'jpeg' ? 'jpg' : exportImageFormat === 'webp' ? 'webp' : 'png'
         const nameCounts = new Map<string, number>()
