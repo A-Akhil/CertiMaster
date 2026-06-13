@@ -51,3 +51,4 @@ __pycache__/
 verification-backend/wrangler.toml
 verification-backend/passwords.txt
 audit.md
+unique_name*
