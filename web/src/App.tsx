@@ -17,7 +17,7 @@
  */
 
 import React, { useState, useRef, useEffect } from "react"
-import { Download, FileText, ImageIcon, Linkedin, Coffee, Github, ChevronUp, ChevronDown, Eye, EyeOff } from "lucide-react"
+import { Download, FileText, ImageIcon, Linkedin, Coffee, Github, ChevronUp, ChevronDown, Eye, EyeOff, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -25,7 +25,7 @@ import { Slider } from "@/components/ui/slider"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
 import * as XLSX from "xlsx"
 import Papa from "papaparse"
-import JSZip from "jszip"
+import * as fflate from "fflate"
 import { saveAs } from "file-saver"
 import QRCode from "qrcode"
 import { jsPDF } from "jspdf"
@@ -34,6 +34,7 @@ import { jsPDF } from "jspdf"
 declare global {
   interface Window {
     queryLocalFonts?: () => Promise<{ family: string; fullName: string; postscriptName: string; style: string }[]>;
+    runBenchmark?: (count?: number) => Promise<void>;
   }
 }
 
@@ -143,6 +144,7 @@ export default function App() {
   const [eventDate, setEventDate] = useState(new Date().toISOString().split('T')[0])
   const [qrConfig, setQrConfig] = useState({ x: 20, y: 20, size: 188 })
   const [moveTarget, setMoveTarget] = useState<'name' | 'position' | 'qr'>('name')
+  const [showBrowserWarning, setShowBrowserWarning] = useState(false)
   const qrAutoPositionedRef = useRef(false)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -605,6 +607,10 @@ export default function App() {
       await registerFontFace(key, item.family, record.blob, 'google')
       addFontToList(item.family)
 
+      // Store the binary data so the worker can load this font in its OffscreenCanvas
+      const fontBinary = await record.blob.arrayBuffer()
+      customFontDataRef.current.set(item.family, fontBinary)
+
       // Force canvas redraw if this font is currently selected.
       setConfig(prev => prev.fontFamily === item.family ? { ...prev } : prev)
     })()
@@ -703,11 +709,21 @@ export default function App() {
         for (const rec of toLoad) {
           await registerFontFace(rec.key, rec.family, rec.blob, rec.source)
           addFontToList(rec.family)
+          // Store binary data so workers can load these fonts during generation
+          try {
+            const fontBinary = await rec.blob.arrayBuffer()
+            customFontDataRef.current.set(rec.family, fontBinary)
+          } catch { /* non-critical */ }
         }
       } catch (err) {
         console.error('Failed to restore persisted fonts:', err)
       }
     })()
+
+    // Check if the browser supports File System Access API
+    if (!('showDirectoryPicker' in window)) {
+      setShowBrowserWarning(true)
+    }
   }, [])
 
   // --- Handlers ---
@@ -1420,7 +1436,7 @@ export default function App() {
     const askBatch = window.confirm(
       `This run will download ${totalBatches} ZIP files (one per batch).\n\n` +
       `Press OK to request browser permission for multiple downloads now.\n\n` +
-      `Press Cancel to continue in single ZIP mode (safer downloads, but your system may be slower during generation).`
+      `Press Cancel to continue in single ZIP mode (safer downloads, but your system may freeze during generation).`
     )
     if (!askBatch) return 'single'
 
@@ -1601,49 +1617,27 @@ export default function App() {
       effectiveBatchSize = Math.max(1, Math.min(exportNames.length, Math.floor(exportBatchSize || 1)))
     }
 
-    const totalBatches = Math.max(1, Math.ceil(exportNames.length / Math.max(1, effectiveBatchSize)))
+    const needsMultipleZips = !('showDirectoryPicker' in window) || exportImageFormat === 'pdf'
+    let actualBatchSize = needsMultipleZips ? effectiveBatchSize : exportNames.length
 
-    if (totalBatches > 1 && (exportBatchMode === 'auto' || exportBatchMode === 'multi')) {
-      const generationMode = await requestMultipleDownloadPermission(totalBatches)
-      if (generationMode === 'single') {
-        effectiveBatchSize = exportNames.length
-        preflightWarning = 'Multiple-download permission was not granted. Continuing with a single ZIP download. This can be slower and heavier on your system because all processing happens locally.'
+    if (needsMultipleZips && actualBatchSize < exportNames.length) {
+      const totalBatches = Math.ceil(exportNames.length / actualBatchSize)
+      if (totalBatches > 1 && (exportBatchMode === 'auto' || exportBatchMode === 'multi')) {
+        const generationMode = await requestMultipleDownloadPermission(totalBatches)
+        if (generationMode === 'single') {
+          actualBatchSize = exportNames.length
+          preflightWarning = 'Multiple-download permission was not granted. Continuing with a single ZIP download. This can be slower and heavier on your system.'
+        }
       }
     }
 
     setVerificationStatus(preflightWarning ? { type: 'warning', message: preflightWarning } : null)
+
     preloadTicketRef.current += 1
     setIsGenerating(true)
     setGenerationProgress(0)
     setGenerationPhase('rendering')
     setGenerationBatchLabel('')
-
-    type WorkerProgress = {
-      type: 'progress'
-      processed: number
-      total: number
-      batchIndex: number
-      totalBatches: number
-      phase: 'rendering' | 'batch-zipping'
-    }
-
-    type WorkerBatchReady = {
-      type: 'batch-ready'
-      batchIndex: number
-      totalBatches: number
-      zipBuffer: ArrayBuffer
-      zipFileName: string
-    }
-
-    type WorkerDone = {
-      type: 'done'
-      verificationRecords: { id: string; name: string; event: string; date: string }[]
-    }
-
-    type WorkerError = {
-      type: 'error'
-      message: string
-    }
 
     const zipBase = (zipName || 'certificates').trim() || 'certificates'
 
@@ -1729,7 +1723,8 @@ export default function App() {
 
           saveAs(pdf.output('blob'), `${zipBase}.pdf`)
         } else {
-          const zip = new JSZip()
+          const zipData: Record<string, Uint8Array> = {}
+          let batchIndex = 1
           for (let i = 0; i < exportNames.length; i++) {
             const pageData = await makePageDataUrl(i)
             const pdf = new jsPDF({
@@ -1744,93 +1739,230 @@ export default function App() {
             const seen = pdfNameCounts.get(safeBase) || 0
             pdfNameCounts.set(safeBase, seen + 1)
             const fileName = seen > 0 ? `${safeBase}_${seen + 1}.pdf` : `${safeBase}.pdf`
-            zip.file(fileName, pdf.output('arraybuffer'))
+            zipData[fileName] = new Uint8Array(pdf.output('arraybuffer'))
             setGenerationProgress(Math.round(((i + 1) / Math.max(1, exportNames.length)) * 100))
+            
+            if (Object.keys(zipData).length >= actualBatchSize || i === exportNames.length - 1) {
+              setGenerationPhase('batch-zipping')
+              const zippedData = fflate.zipSync(zipData, { level: (exportZipCompression === 'deflate' ? Math.max(1, Math.min(9, Math.floor(exportZipLevel))) : 0) as any })
+              const zipBlob = new Blob([zippedData], { type: 'application/zip' })
+              const finalName = actualBatchSize >= exportNames.length ? `${zipBase}.zip` : `${zipBase}_part${batchIndex}.zip`
+              saveAs(zipBlob, finalName)
+              
+              for (const key of Object.keys(zipData)) delete zipData[key]
+              batchIndex++
+              if (i < exportNames.length - 1) {
+                 setGenerationPhase('rendering')
+                 await new Promise(r => setTimeout(r, 200))
+              }
+            }
           }
-
-          setGenerationPhase('batch-zipping')
-          const zipBlob = await zip.generateAsync({
-            type: 'blob',
-            compression: exportZipCompression === 'deflate' ? 'DEFLATE' : 'STORE',
-            compressionOptions: exportZipCompression === 'deflate'
-              ? { level: Math.max(1, Math.min(9, Math.floor(exportZipLevel))) }
-              : undefined,
-            streamFiles: true
-          })
-          saveAs(zipBlob, `${zipBase}.zip`)
         }
       } else {
-        const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
+        let dirHandle: FileSystemDirectoryHandle | null = null
+        let manifest: Record<string, string> = {}
+        const zipFallback: Record<string, Uint8Array> = {}
 
-        const selectedFamilies = new Set<string>([config.fontFamily])
-        if (certificateType === 'winner') selectedFamilies.add(positionConfig.fontFamily)
-        const customFontsForWorker = Array.from(selectedFamilies)
-          .map((family) => {
-            const data = customFontDataRef.current.get(family)
-            if (!data) return null
-            return { family, data: data.slice(0) }
-          })
-          .filter((f): f is { family: string; data: ArrayBuffer } => Boolean(f))
-        const customFontTransfers = customFontsForWorker.map((f) => f.data)
-
-        const workerResult = await new Promise<{ records: { id: string; name: string; event: string; date: string }[] }>((resolve, reject) => {
-          worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerBatchReady | WorkerDone | WorkerError>) => {
-            const message = event.data
-            if (message.type === 'progress') {
-              setGenerationPhase(message.phase)
-              setGenerationProgress(Math.round((message.processed / Math.max(1, message.total)) * 100))
-              setGenerationBatchLabel(`Batch ${message.batchIndex}/${message.totalBatches}`)
-              return
-            }
-
-            if (message.type === 'batch-ready') {
-              const blob = new Blob([message.zipBuffer], { type: 'application/zip' })
-              saveAs(blob, message.zipFileName)
-              return
-            }
-
-            if (message.type === 'done') {
-              resolve({ records: message.verificationRecords })
-              return
-            }
-
-            reject(new Error(message.message || 'Worker generation failed'))
+        try {
+          if ('showDirectoryPicker' in window) {
+            dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
           }
-
-          worker.onerror = (err) => {
-            reject(new Error(err.message || 'Worker crashed during generation'))
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+             setIsGenerating(false)
+             setGenerationPhase('idle')
+             return
           }
+        }
 
-          worker.postMessage({
-            type: 'start',
-            payload: {
-              templateDataUrl: template,
-              names: exportNames,
-              positions: exportPositions,
-              fileBaseNames: exportFileBaseNames,
-              certificateType,
-              positionFormat,
-              config,
-              positionConfig,
-              outputFormat: exportImageFormat,
-              outputQuality: Math.max(0.5, Math.min(1, Math.round(exportQuality * 100) / 100)),
-              verificationEnabled,
-              verificationBaseUrl: baseUrl,
-              eventName,
-              eventDate,
-              qrConfig,
-              batchSize: effectiveBatchSize,
-              zipBaseName: zipBase,
-              zipCompression: exportZipCompression === 'deflate' ? 'DEFLATE' : 'STORE',
-              zipCompressionLevel: Math.max(1, Math.min(9, Math.floor(exportZipLevel))),
-              customFonts: customFontsForWorker
-            }
-          }, customFontTransfers)
-        }).finally(() => {
-          worker.terminate()
-        })
+        if (dirHandle) {
+           try {
+             const manifestHandle = await dirHandle.getFileHandle('.certimaster_manifest.json')
+             const file = await manifestHandle.getFile()
+             const text = await file.text()
+             manifest = JSON.parse(text)
+           } catch {
+             manifest = {}
+           }
+        }
 
-        batchRecords = workerResult.records
+        const allTasks: any[] = []
+        const ext = exportImageFormat === 'jpeg' ? 'jpg' : exportImageFormat === 'webp' ? 'webp' : 'png'
+        const nameCounts = new Map<string, number>()
+
+        for (let i = 0; i < exportNames.length; i++) {
+           const preferredBase = exportFileBaseNames[i] || exportNames[i]
+           const safeBase = sanitizeFileName(preferredBase)
+           const seen = nameCounts.get(safeBase) || 0
+           nameCounts.set(safeBase, seen + 1)
+           const fileName = seen > 0 ? `${safeBase}_${seen + 1}.${ext}` : `${safeBase}.${ext}`
+           
+           let uuid = manifest[fileName]
+           if (!uuid) {
+              uuid = crypto.randomUUID()
+              manifest[fileName] = uuid
+           }
+           
+           allTasks.push({
+              name: exportNames[i],
+              positionRaw: exportPositions[i] || '',
+              uuid: verificationEnabled ? uuid : '',
+              fileName
+           })
+        }
+        
+        if (dirHandle) {
+           const manifestHandle = await dirHandle.getFileHandle('.certimaster_manifest.json', { create: true })
+           const writable = await manifestHandle.createWritable()
+           await writable.write(JSON.stringify(manifest, null, 2))
+           await writable.close()
+        }
+
+        const filteredTasks: any[] = []
+        let skippedCount = 0
+        
+        for (const task of allTasks) {
+           if (dirHandle) {
+               try {
+                   const fh = await dirHandle.getFileHandle(task.fileName)
+                   const f = await fh.getFile()
+                   if (f.size > 0) {
+                       skippedCount++
+                       continue
+                   }
+               } catch {
+                   // does not exist
+               }
+           }
+           filteredTasks.push(task)
+        }
+
+        batchRecords = allTasks.filter(t => t.uuid).map(t => ({ id: t.uuid, name: t.name, event: eventName, date: eventDate }))
+        let completedTasks = skippedCount
+        setGenerationProgress(Math.round((completedTasks / allTasks.length) * 100))
+        setGenerationBatchLabel(`Resumed: Skipped ${skippedCount} existing files`)
+
+        if (filteredTasks.length > 0) {
+            const selectedFamilies = new Set<string>([config.fontFamily])
+            if (certificateType === 'winner') selectedFamilies.add(positionConfig.fontFamily)
+            const customFontsForWorker = Array.from(selectedFamilies)
+              .map((family) => {
+                const data = customFontDataRef.current.get(family)
+                if (!data) return null
+                return { family, data: data.slice(0) }
+              })
+              .filter((f): f is { family: string; data: ArrayBuffer } => Boolean(f))
+    
+            const BATCH_SIZE = 20
+            // Reserve 3 cores for the OS and main UI thread to prevent system lag
+            const maxConcurrency = Math.max(1, (navigator.hardwareConcurrency || 4) - 3)
+            const numWorkers = Math.min(Math.ceil(filteredTasks.length / BATCH_SIZE), maxConcurrency)
+    
+            await new Promise<void>((resolve, reject) => {
+                let activeWorkers = numWorkers
+                let hasError = false
+                let nextTaskIndex = 0
+    
+                for (let w = 0; w < numWorkers; w++) {
+                    const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
+                    const customFontTransfers = customFontsForWorker.map(f => f.data.slice(0))
+                    const fontsPayload = customFontsForWorker.map((f, idx) => ({ family: f.family, data: customFontTransfers[idx] }))
+    
+                    const sendNextBatch = () => {
+                        if (hasError) return
+                        if (nextTaskIndex >= filteredTasks.length) {
+                            activeWorkers--
+                            worker.terminate()
+                            if (activeWorkers === 0) resolve()
+                            return
+                        }
+                        const tasksForBatch = filteredTasks.slice(nextTaskIndex, nextTaskIndex + BATCH_SIZE)
+                        nextTaskIndex += BATCH_SIZE
+                        worker.postMessage({ type: 'render-batch', tasks: tasksForBatch, batchId: nextTaskIndex })
+                    }
+    
+                    let batchWritePromises: Promise<void>[] = []
+
+                    worker.onmessage = async (event) => {
+                        if (hasError) return
+                        const msg = event.data
+                        
+                        if (msg.type === 'init-done') {
+                            sendNextBatch()
+                        } else if (msg.type === 'image-ready') {
+                           if (dirHandle) {
+                               const writePromise = dirHandle.getFileHandle(msg.fileName, { create: true })
+                                   .then(fh => fh.createWritable())
+                                   .then(writable => writable.write(msg.buffer).then(() => writable.close()))
+                                   .then(() => {
+                                        completedTasks++
+                                        setGenerationProgress(Math.round((completedTasks / allTasks.length) * 100))
+                                   })
+                                   .catch(err => {
+                                        hasError = true
+                                        reject(new Error(`Failed to write ${msg.fileName} to disk. Error: ${err.message}`))
+                                   })
+                               batchWritePromises.push(writePromise as Promise<void>)
+                           } else {
+                               zipFallback[msg.fileName] = new Uint8Array(msg.buffer)
+                               completedTasks++
+                               setGenerationProgress(Math.round((completedTasks / allTasks.length) * 100))
+
+                               if (Object.keys(zipFallback).length >= actualBatchSize || completedTasks === allTasks.length) {
+                                   if (completedTasks === allTasks.length) {
+                                      zipFallback['.certimaster_manifest.json'] = fflate.strToU8(JSON.stringify(manifest, null, 2))
+                                   }
+                                   
+                                   const zippedData = fflate.zipSync(zipFallback, { level: (exportZipCompression === 'deflate' ? Math.max(1, Math.min(9, Math.floor(exportZipLevel))) : 0) as any })
+                                   const zipBlob = new Blob([zippedData], { type: 'application/zip' })
+                                   const finalName = actualBatchSize >= allTasks.length ? `${zipBase}.zip` : `${zipBase}_part${Math.ceil(completedTasks / actualBatchSize)}.zip`
+                                   saveAs(zipBlob, finalName)
+                                   
+                                   for (const key of Object.keys(zipFallback)) delete zipFallback[key]
+                                   
+                                   if (completedTasks < allTasks.length) {
+                                      await new Promise(r => setTimeout(r, 150))
+                                   }
+                               }
+                           }
+                        } else if (msg.type === 'batch-done') {
+                            if (dirHandle) {
+                                await Promise.all(batchWritePromises)
+                                batchWritePromises = []
+                            }
+                            sendNextBatch()
+                        } else if (msg.type === 'error') {
+                            hasError = true
+                            worker.terminate()
+                            reject(new Error(msg.message))
+                        }
+                    }
+    
+                    worker.onerror = (err) => {
+                        hasError = true
+                        worker.terminate()
+                        reject(new Error(err.message || 'Worker crashed during generation'))
+                    }
+    
+                    worker.postMessage({
+                        type: 'init',
+                        payload: {
+                            templateDataUrl: template,
+                            certificateType,
+                            positionFormat,
+                            config,
+                            positionConfig,
+                            outputFormat: exportImageFormat,
+                            outputQuality: Math.max(0.5, Math.min(1, Math.round(exportQuality * 100) / 100)),
+                            verificationEnabled,
+                            verificationBaseUrl: baseUrl,
+                            qrConfig,
+                            customFonts: fontsPayload
+                        }
+                    }, customFontTransfers)
+                }
+            })
+        }
       }
     } catch (err) {
       setVerificationStatus({
@@ -1975,6 +2107,171 @@ export default function App() {
       setIsTestingConnection(false)
     }
   }
+
+  useEffect(() => {
+    window.runBenchmark = async (count = 1000, withQR = false, saveToDisk = true) => {
+      console.log(`Starting benchmark for ${count} certificates (QR: ${withQR ? 'Enabled' : 'Disabled'}, Disk I/O: ${saveToDisk ? 'Enabled' : 'Disabled'})...`)
+      
+      const fakeTasks = Array.from({ length: count }, (_, i) => ({
+        name: `Benchmark User ${i + 1}`,
+        positionRaw: String(i + 1),
+        uuid: crypto.randomUUID(),
+        fileName: `benchmark_${i + 1}.png`
+      }))
+      
+      let templateDataUrl = ''
+      try {
+        const res = await fetch('/benchmark-template.png')
+        if (!res.ok) throw new Error('Not found')
+        const blob = await res.blob()
+        const reader = new FileReader()
+        templateDataUrl = await new Promise((resolve) => {
+          reader.onload = () => resolve(reader.result as string)
+          reader.readAsDataURL(blob)
+        })
+      } catch (err) {
+        console.error('Failed to load benchmark template. Make sure /benchmark-template.png is in public dir.', err)
+        return
+      }
+
+      console.log('Spawning workers...')
+      
+      let dirHandle: any = null
+      if (saveToDisk) {
+        try {
+          if ('showDirectoryPicker' in window) {
+            dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' })
+            console.log('Folder selected. Benchmark will write to disk.')
+          } else {
+            console.warn('showDirectoryPicker not supported. Benchmark will only test CPU/Memory rendering (no disk IO).')
+          }
+        } catch (err) {
+          console.warn('Folder selection cancelled. Benchmark will only test CPU/Memory rendering.')
+        }
+      }
+
+      const BATCH_SIZE = 20
+      const maxConcurrency = Math.max(1, (navigator.hardwareConcurrency || 4) - 2)
+      const numWorkers = Math.min(Math.ceil(count / BATCH_SIZE), maxConcurrency)
+      
+      const startTime = performance.now()
+      let maxHeap = 0
+      const memoryInterval = setInterval(() => {
+        const mem = (performance as any).memory
+        if (mem && mem.usedJSHeapSize > maxHeap) {
+          maxHeap = mem.usedJSHeapSize
+        }
+      }, 50)
+
+      let nextTaskIndex = 0
+      let completedTasks = 0
+      let activeWorkers = numWorkers
+      let hasError = false
+
+      const customFontsForWorker = Array.from(customFontDataRef.current.entries()).map(([family, data]) => {
+          return { family, data: data.slice(0) }
+      })
+
+      return new Promise<void>((resolve, reject) => {
+          for (let w = 0; w < numWorkers; w++) {
+              const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
+              const customFontTransfers = customFontsForWorker.map(f => f.data.slice(0))
+              const fontsPayload = customFontsForWorker.map((f, idx) => ({ family: f.family, data: customFontTransfers[idx] }))
+              
+              const sendNextBatch = () => {
+                  if (hasError) return
+                  if (nextTaskIndex >= fakeTasks.length) {
+                      activeWorkers--
+                      worker.terminate()
+                      if (activeWorkers === 0) {
+                          const endTime = performance.now()
+                          clearInterval(memoryInterval)
+                          const timeMs = endTime - startTime
+                          console.log('--- BENCHMARK COMPLETE ---')
+                          console.log(`Certificates: ${count}`)
+                          console.log(`Time: ${(timeMs / 1000).toFixed(2)} seconds`)
+                          if (maxHeap > 0) {
+                            console.log(`Peak Memory (usedJSHeapSize): ${(maxHeap / 1024 / 1024).toFixed(2)} MB`)
+                          } else {
+                            console.log('Memory profiling not available in this browser (requires Chrome/Chromium).')
+                          }
+                          resolve()
+                      }
+                      return
+                  }
+                  const tasksForBatch = fakeTasks.slice(nextTaskIndex, nextTaskIndex + BATCH_SIZE)
+                  nextTaskIndex += BATCH_SIZE
+                  worker.postMessage({ type: 'render-batch', tasks: tasksForBatch, batchId: nextTaskIndex })
+              }
+
+              let batchWritePromises: Promise<void>[] = []
+
+              worker.onmessage = async (e) => {
+                  const msg = e.data
+                  if (msg.type === 'init-done') {
+                      sendNextBatch()
+                  } else if (msg.type === 'image-ready') {
+                      if (dirHandle) {
+                          const writePromise = dirHandle.getFileHandle(msg.fileName, { create: true })
+                              .then((fh: any) => fh.createWritable())
+                              .then((writable: any) => writable.write(msg.buffer).then(() => writable.close()))
+                              .then(() => {
+                                  completedTasks++
+                                  if (completedTasks % 100 === 0 || completedTasks === count) {
+                                      console.log(`Progress: ${completedTasks}/${count}`)
+                                  }
+                              })
+                              .catch((err: any) => {
+                                  hasError = true
+                                  reject(new Error(`Failed to write to disk. Error: ${err.message}`))
+                              })
+                          batchWritePromises.push(writePromise)
+                      } else {
+                          completedTasks++
+                          if (completedTasks % 100 === 0 || completedTasks === count) {
+                              console.log(`Progress: ${completedTasks}/${count}`)
+                          }
+                      }
+                  } else if (msg.type === 'batch-done') {
+                      if (dirHandle) {
+                          await Promise.all(batchWritePromises)
+                          batchWritePromises = []
+                      }
+                      sendNextBatch()
+                  } else if (msg.type === 'error') {
+                      console.error('Worker error:', msg.message)
+                      hasError = true
+                      clearInterval(memoryInterval)
+                      worker.terminate()
+                      resolve()
+                  }
+              }
+
+              worker.postMessage({ type: 'init', payload: {
+                templateDataUrl,
+                certificateType: 'participation' as any,
+                positionFormat: 'ordinal' as any,
+                config: {
+                  x: 1000, y: 700, fontSize: 80, color: '#000000', fontFamily: 'Arial', textTransform: 'capitalize' as any
+                },
+                positionConfig: {
+                  x: 1000, y: 850, fontSize: 60, color: '#000000', fontFamily: 'Arial', textTransform: 'none' as any
+                },
+                outputFormat: 'png' as any,
+                outputQuality: 0.92,
+                verificationEnabled: withQR,
+                verificationBaseUrl: withQR ? 'https://benchmark.local' : null,
+                qrConfig: { x: 20, y: 20, size: 200 },
+                customFonts: fontsPayload
+              }}, customFontTransfers)
+          }
+      })
+    }
+    
+    return () => {
+      delete window.runBenchmark
+    }
+  }, [])
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-900">
@@ -2952,6 +3249,44 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Browser Warning Modal */}
+      {showBrowserWarning && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full p-6 space-y-4">
+            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+              <AlertTriangle className="w-6 h-6 text-amber-500" />
+              Unsupported Browser Detected
+            </h2>
+            <div className="text-slate-600 space-y-4 text-sm leading-relaxed">
+              <p>
+                It looks like you're using a browser (like Firefox or Safari) that doesn't fully support saving files directly to your computer.
+              </p>
+              <div>
+                <strong className="text-slate-800">What does this mean?</strong>
+                <p className="mt-1">
+                  CertiMaster is super fast on Chrome or Edge because it instantly streams certificates into a folder on your computer.
+                </p>
+              </div>
+              <div>
+                <strong className="text-slate-800">Can I still use this browser?</strong>
+                <p className="mt-1">
+                  Yes! But instead of saving files instantly, your browser will hold all the images in memory until the job finishes, and then give you a single massive ZIP file to download. For small events, you won't notice a difference. But for larger events, your browser might freeze or crash.
+                </p>
+              </div>
+              <p className="font-medium text-slate-700">
+                For the best and fastest experience, we highly recommend switching to Google Chrome, Microsoft Edge, or Brave!
+              </p>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => setShowBrowserWarning(false)} className="bg-slate-800 text-white hover:bg-slate-700">
+                I understand, continue anyway
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

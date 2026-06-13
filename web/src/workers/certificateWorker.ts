@@ -1,11 +1,9 @@
-import JSZip from 'jszip'
 import QRCode from 'qrcode'
 
 type TextTransform = 'none' | 'uppercase' | 'lowercase' | 'capitalize'
 type CertificateType = 'participation' | 'winner'
 type PositionFormat = 'ordinal' | 'roman' | 'words'
 type OutputFormat = 'png' | 'jpeg' | 'webp'
-type ZipCompression = 'STORE' | 'DEFLATE'
 
 type TextConfig = {
   x: number
@@ -22,23 +20,20 @@ type QrConfig = {
   size: number
 }
 
-type VerificationRecord = {
-  id: string
-  name: string
-  event: string
-  date: string
-}
-
 type CustomFontPayload = {
   family: string
   data: ArrayBuffer
 }
 
-type StartPayload = {
+export type WorkerTask = {
+  name: string
+  positionRaw: string
+  uuid: string
+  fileName: string
+}
+
+type InitPayload = {
   templateDataUrl: string
-  names: string[]
-  positions: string[]
-  fileBaseNames: string[]
   certificateType: CertificateType
   positionFormat: PositionFormat
   config: TextConfig
@@ -47,19 +42,19 @@ type StartPayload = {
   outputQuality: number
   verificationEnabled: boolean
   verificationBaseUrl: string | null
-  eventName: string
-  eventDate: string
   qrConfig: QrConfig
-  batchSize: number
-  zipBaseName: string
-  zipCompression: ZipCompression
-  zipCompressionLevel: number
   customFonts: CustomFontPayload[]
 }
 
-type StartMessage = {
-  type: 'start'
-  payload: StartPayload
+type InitMessage = {
+  type: 'init'
+  payload: InitPayload
+}
+
+type RenderBatchMessage = {
+  type: 'render-batch'
+  tasks: WorkerTask[]
+  batchId: number
 }
 
 const applyTextTransform = (text: string, transform: TextTransform) => {
@@ -165,11 +160,6 @@ const normalizePositionText = (raw: string, fallbackRank: number, positionFormat
   return toOrdinal(n)
 }
 
-const sanitizeFileName = (name: string) => {
-  const cleaned = name.replace(/[\\/:*?"<>|]/g, '_').trim()
-  return cleaned || 'certificate'
-}
-
 const loadCustomFonts = async (customFonts: CustomFontPayload[], families: string[]) => {
   if (!customFonts.length || typeof FontFace === 'undefined') return
 
@@ -191,73 +181,108 @@ const loadCustomFonts = async (customFonts: CustomFontPayload[], families: strin
   }
 }
 
-const postProgress = (processed: number, total: number, batchIndex: number, totalBatches: number, phase: 'rendering' | 'batch-zipping') => {
-  ;(self as unknown as Worker).postMessage({
-    type: 'progress',
-    processed,
-    total,
-    batchIndex,
-    totalBatches,
-    phase
-  })
-}
+let workerContext: {
+  templateBitmap: ImageBitmap
+  canvas: OffscreenCanvas
+  ctx: OffscreenCanvasRenderingContext2D
+  config: TextConfig
+  positionConfig: TextConfig
+  certificateType: CertificateType
+  positionFormat: PositionFormat
+  verificationEnabled: boolean
+  verificationBaseUrl: string | null
+  qrConfig: QrConfig
+  mime: string
+  quality: number
+  outputFormat: OutputFormat
+} | null = null
 
-self.onmessage = async (event: MessageEvent<StartMessage>) => {
-  if (event.data?.type !== 'start') return
+self.onmessage = async (event: MessageEvent<InitMessage | RenderBatchMessage>) => {
+  if (event.data?.type === 'init') {
+    const {
+      templateDataUrl,
+      certificateType,
+      positionFormat,
+      config,
+      positionConfig,
+      outputFormat,
+      outputQuality,
+      verificationEnabled,
+      verificationBaseUrl,
+      qrConfig,
+      customFonts
+    } = event.data.payload
 
-  const {
-    templateDataUrl,
-    names,
-    positions,
-    fileBaseNames,
-    certificateType,
-    positionFormat,
-    config,
-    positionConfig,
-    outputFormat,
-    outputQuality,
-    verificationEnabled,
-    verificationBaseUrl,
-    eventName,
-    eventDate,
-    qrConfig,
-    batchSize,
-    zipBaseName,
-    zipCompression,
-    zipCompressionLevel,
-    customFonts
-  } = event.data.payload
+    try {
+      const templateBlob = await (await fetch(templateDataUrl)).blob()
+      const templateBitmap = await createImageBitmap(templateBlob)
 
-  try {
-    const templateBlob = await (await fetch(templateDataUrl)).blob()
-    const templateBitmap = await createImageBitmap(templateBlob)
+      const canvas = new OffscreenCanvas(templateBitmap.width, templateBitmap.height)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        ;(self as unknown as Worker).postMessage({ type: 'error', message: 'Worker canvas context unavailable.' })
+        return
+      }
 
-    const canvas = new OffscreenCanvas(templateBitmap.width, templateBitmap.height)
-    const ctx = canvas.getContext('2d')
-    if (!ctx) {
-      ;(self as unknown as Worker).postMessage({ type: 'error', message: 'Worker canvas context unavailable.' })
+      const workerFamilies = [config.fontFamily]
+      if (certificateType === 'winner') workerFamilies.push(positionConfig.fontFamily)
+      await loadCustomFonts(customFonts || [], workerFamilies)
+
+      const mime = outputFormat === 'jpeg' ? 'image/jpeg' : outputFormat === 'webp' ? 'image/webp' : 'image/png'
+      const quality = Math.max(0.5, Math.min(1, Number.isFinite(outputQuality) ? outputQuality : 0.92))
+
+      workerContext = {
+        templateBitmap,
+        canvas,
+        ctx,
+        config,
+        positionConfig,
+        certificateType,
+        positionFormat,
+        verificationEnabled,
+        verificationBaseUrl,
+        qrConfig,
+        mime,
+        quality,
+        outputFormat
+      }
+
+      ;(self as unknown as Worker).postMessage({ type: 'init-done' })
+    } catch (err) {
+      ;(self as unknown as Worker).postMessage({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Unknown worker initialization failure.'
+      })
+    }
+    return
+  }
+
+  if (event.data?.type === 'render-batch') {
+    if (!workerContext) {
+      ;(self as unknown as Worker).postMessage({ type: 'error', message: 'Worker not initialized.' })
       return
     }
 
-    const workerFamilies = [config.fontFamily]
-    if (certificateType === 'winner') workerFamilies.push(positionConfig.fontFamily)
-    await loadCustomFonts(customFonts || [], workerFamilies)
+    const { tasks, batchId } = event.data
+    const {
+      templateBitmap,
+      canvas,
+      ctx,
+      config,
+      positionConfig,
+      certificateType,
+      positionFormat,
+      verificationEnabled,
+      verificationBaseUrl,
+      qrConfig,
+      mime,
+      quality,
+      outputFormat
+    } = workerContext
 
-    const total = names.length
-    const totalBatches = Math.max(1, Math.ceil(total / Math.max(1, batchSize)))
-    const records: VerificationRecord[] = []
-    const ext = outputFormat === 'jpeg' ? 'jpg' : outputFormat === 'webp' ? 'webp' : 'png'
-    const mime = outputFormat === 'jpeg' ? 'image/jpeg' : outputFormat === 'webp' ? 'image/webp' : 'image/png'
-    const quality = Math.max(0.5, Math.min(1, Number.isFinite(outputQuality) ? outputQuality : 0.92))
-
-    for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
-      const start = batchIdx * batchSize
-      const end = Math.min(total, start + batchSize)
-      const zip = new JSZip()
-      const nameCounts = new Map<string, number>()
-
-      for (let i = start; i < end; i++) {
-        const name = names[i]
+    try {
+      for (let i = 0; i < tasks.length; i++) {
+        const task = tasks[i]
 
         ctx.clearRect(0, 0, canvas.width, canvas.height)
         ctx.drawImage(templateBitmap, 0, 0)
@@ -266,7 +291,7 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
         ctx.fillStyle = config.color
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
-        const transformedName = applyTextTransform(name, config.textTransform)
+        const transformedName = applyTextTransform(task.name, config.textTransform)
         ctx.fillText(transformedName, config.x, config.y)
 
         if (certificateType === 'winner') {
@@ -274,17 +299,14 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
           ctx.fillStyle = positionConfig.color
           ctx.textAlign = 'center'
           ctx.textBaseline = 'middle'
-          const posRaw = positions[i] || ''
+          const posRaw = task.positionRaw
           const posText = normalizePositionText(posRaw, i + 1, positionFormat)
           const transformedPos = applyTextTransform(posText, positionConfig.textTransform)
           ctx.fillText(transformedPos, positionConfig.x, positionConfig.y)
         }
 
-        if (verificationEnabled && verificationBaseUrl) {
-          const id = crypto.randomUUID()
-          records.push({ id, name, event: eventName, date: eventDate })
-
-          const qrUrl = `${verificationBaseUrl}/verify/${id}`
+        if (verificationEnabled && verificationBaseUrl && task.uuid) {
+          const qrUrl = `${verificationBaseUrl}/verify/${task.uuid}`
           const qrCanvas = new OffscreenCanvas(qrConfig.size, qrConfig.size)
           await QRCode.toCanvas(qrCanvas as unknown as HTMLCanvasElement, qrUrl, {
             width: qrConfig.size,
@@ -298,48 +320,22 @@ self.onmessage = async (event: MessageEvent<StartMessage>) => {
             ? { type: mime }
             : { type: mime, quality }
         )
-        const preferredBase = fileBaseNames?.[i] || name
-        const safeBase = sanitizeFileName(preferredBase)
-        const seen = nameCounts.get(safeBase) || 0
-        nameCounts.set(safeBase, seen + 1)
-        const fileName = seen > 0 ? `${safeBase}_${seen + 1}.${ext}` : `${safeBase}.${ext}`
-        zip.file(fileName, outputBlob)
+        
+        const buffer = await outputBlob.arrayBuffer()
 
-        if ((i - start) % 3 === 0 || i === end - 1) {
-          postProgress(i + 1, total, batchIdx + 1, totalBatches, 'rendering')
-        }
+        ;(self as unknown as Worker).postMessage({
+          type: 'image-ready',
+          fileName: task.fileName,
+          buffer
+        }, [buffer])
       }
 
-      postProgress(end, total, batchIdx + 1, totalBatches, 'batch-zipping')
-      const zipBlob = await zip.generateAsync({
-        type: 'blob',
-        compression: zipCompression,
-        compressionOptions: zipCompression === 'DEFLATE'
-          ? { level: Math.max(1, Math.min(9, Math.floor(zipCompressionLevel))) }
-          : undefined,
-        streamFiles: true
-      })
-      const zipBuffer = await zipBlob.arrayBuffer()
-
+      ;(self as unknown as Worker).postMessage({ type: 'batch-done', batchId })
+    } catch (err) {
       ;(self as unknown as Worker).postMessage({
-        type: 'batch-ready',
-        batchIndex: batchIdx + 1,
-        totalBatches,
-        zipFileName: totalBatches === 1
-          ? `${zipBaseName}.zip`
-          : `${zipBaseName}_part_${batchIdx + 1}_of_${totalBatches}.zip`,
-        zipBuffer
-      }, [zipBuffer])
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Unknown worker failure during batch generation.'
+      })
     }
-
-    ;(self as unknown as Worker).postMessage({
-      type: 'done',
-      verificationRecords: records
-    })
-  } catch (err) {
-    ;(self as unknown as Worker).postMessage({
-      type: 'error',
-      message: err instanceof Error ? err.message : 'Unknown worker failure during generation.'
-    })
   }
 }
