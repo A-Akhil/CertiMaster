@@ -1929,7 +1929,43 @@ export default function App() {
                 let activeWorkers = numWorkers
                 let hasError = false
                 let nextTaskIndex = 0
-    
+
+                // Serialized write queue to prevent concurrent dirHandle access
+                // which causes "state cached in an interface object" errors
+                const writeQueue: { fileName: string; buffer: ArrayBuffer }[] = []
+                let isWriting = false
+
+                const drainWriteQueue = async () => {
+                    if (isWriting || hasError) return
+                    isWriting = true
+                    while (writeQueue.length > 0 && !hasError) {
+                        const item = writeQueue.shift()!
+                        const MAX_RETRIES = 3
+                        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                            try {
+                                const fh = await dirHandle!.getFileHandle(item.fileName, { create: true })
+                                const writable = await fh.createWritable()
+                                await writable.write(item.buffer)
+                                await writable.close()
+                                completedTasks++
+                                setGenerationProgress(Math.round((completedTasks / allTasks.length) * 100))
+                                break
+                            } catch (err: any) {
+                                if (attempt < MAX_RETRIES - 1) {
+                                    // Brief pause to let the filesystem settle before retrying
+                                    await new Promise(r => setTimeout(r, 50 * (attempt + 1)))
+                                } else {
+                                    hasError = true
+                                    reject(new Error(`Failed to write ${item.fileName} to disk after ${MAX_RETRIES} attempts. Error: ${err.message}`))
+                                    isWriting = false
+                                    return
+                                }
+                            }
+                        }
+                    }
+                    isWriting = false
+                }
+
                 for (let w = 0; w < numWorkers; w++) {
                     const worker = new Worker(new URL('./workers/certificateWorker.ts', import.meta.url), { type: 'module' })
                     const customFontTransfers = customFontsForWorker.map(f => f.data.slice(0))
@@ -1940,7 +1976,12 @@ export default function App() {
                         if (nextTaskIndex >= filteredTasks.length) {
                             activeWorkers--
                             worker.terminate()
-                            if (activeWorkers === 0) resolve()
+                            if (activeWorkers === 0) {
+                                // Drain any remaining queued writes before resolving
+                                drainWriteQueue().then(() => {
+                                    if (!hasError) resolve()
+                                })
+                            }
                             return
                         }
                         const tasksForBatch = filteredTasks.slice(nextTaskIndex, nextTaskIndex + BATCH_SIZE)
@@ -1948,8 +1989,6 @@ export default function App() {
                         worker.postMessage({ type: 'render-batch', tasks: tasksForBatch, batchId: nextTaskIndex })
                     }
     
-                    let batchWritePromises: Promise<void>[] = []
-
                     worker.onmessage = async (event) => {
                         if (hasError) return
                         const msg = event.data
@@ -1958,18 +1997,8 @@ export default function App() {
                             sendNextBatch()
                         } else if (msg.type === 'image-ready') {
                            if (dirHandle) {
-                               const writePromise = dirHandle.getFileHandle(msg.fileName, { create: true })
-                                   .then(fh => fh.createWritable())
-                                   .then(writable => writable.write(msg.buffer).then(() => writable.close()))
-                                   .then(() => {
-                                        completedTasks++
-                                        setGenerationProgress(Math.round((completedTasks / allTasks.length) * 100))
-                                   })
-                                   .catch(err => {
-                                        hasError = true
-                                        reject(new Error(`Failed to write ${msg.fileName} to disk. Error: ${err.message}`))
-                                   })
-                               batchWritePromises.push(writePromise as Promise<void>)
+                               writeQueue.push({ fileName: msg.fileName, buffer: msg.buffer })
+                               drainWriteQueue()
                            } else {
                                zipFallback[msg.fileName] = new Uint8Array(msg.buffer)
                                completedTasks++
@@ -1993,10 +2022,6 @@ export default function App() {
                                }
                            }
                         } else if (msg.type === 'batch-done') {
-                            if (dirHandle) {
-                                await Promise.all(batchWritePromises)
-                                batchWritePromises = []
-                            }
                             sendNextBatch()
                         } else if (msg.type === 'error') {
                             hasError = true
